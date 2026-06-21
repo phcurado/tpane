@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::fs;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProcessInfo {
     pub pid: i32,
     pub ppid: i32,

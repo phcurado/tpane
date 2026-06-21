@@ -355,17 +355,17 @@ fn control_rows() -> Result<Vec<ControlRow>> {
             expand: None,
             header: true,
         });
-        for role in ["agent", "layout", "key", ""] {
+        for tag in ["agent", "layout", "key", ""] {
             let cards = panel
                 .cards
                 .iter()
-                .filter(|card| card.role.as_deref().unwrap_or("") == role)
+                .filter(|card| card.tag.as_deref().unwrap_or("") == tag)
                 .collect::<Vec<_>>();
             if cards.is_empty() {
                 continue;
             }
             rows.push(ControlRow {
-                title: group_title(role).to_string(),
+                title: group_title(tag).to_string(),
                 subtitle: String::new(),
                 state: None,
                 pane: None,
@@ -444,8 +444,8 @@ fn run_control_command(command: &[String]) -> Result<()> {
     print_response(response)
 }
 
-fn group_title(role: &str) -> &'static str {
-    match role {
+fn group_title(tag: &str) -> &'static str {
+    match tag {
         "agent" => "Agents",
         "layout" => "Layout",
         "key" => "Keys",
@@ -543,11 +543,11 @@ fn print_panels(panels: &[PanelView]) {
     }
 }
 
-fn print_panel_group(panel: &PanelView, role: &str, title: &str) {
+fn print_panel_group(panel: &PanelView, tag: &str, title: &str) {
     let cards = panel
         .cards
         .iter()
-        .filter(|card| card.role.as_deref().unwrap_or("") == role)
+        .filter(|card| card.tag.as_deref().unwrap_or("") == tag)
         .collect::<Vec<_>>();
     if cards.is_empty() {
         return;
@@ -573,24 +573,18 @@ fn print_control(panes: &[PaneSnapshot], current_window: Option<&str>) {
         let a_current = current_window == Some(a.window.as_str());
         let b_current = current_window == Some(b.window.as_str());
         b_current.cmp(&a_current).then_with(|| {
-            (
-                &a.session,
-                &a.window,
-                a.role.as_deref().unwrap_or(""),
-                &a.id,
-            )
-                .cmp(&(
-                    &b.session,
-                    &b.window,
-                    b.role.as_deref().unwrap_or(""),
-                    &b.id,
-                ))
+            (&a.session, &a.window, a.tag.as_deref().unwrap_or(""), &a.id).cmp(&(
+                &b.session,
+                &b.window,
+                b.tag.as_deref().unwrap_or(""),
+                &b.id,
+            ))
         })
     });
 
     for pane in panes {
         let marker = state_marker(pane.state.as_deref());
-        let role = pane.role.as_deref().unwrap_or(&pane.kind);
+        let tag = pane.tag.as_deref().unwrap_or(&pane.kind);
         let active = if current_window == Some(pane.window.as_str()) && pane.active {
             "*"
         } else {
@@ -598,7 +592,7 @@ fn print_control(panes: &[PaneSnapshot], current_window: Option<&str>) {
         };
         println!(
             "  {marker} {active} {:<9} {:<8} {:<12} {}",
-            pane.id, role, pane.window, pane.label
+            pane.id, tag, pane.window, pane.label
         );
     }
 }

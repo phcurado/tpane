@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow};
-use mlua::{Function, Lua, RegistryKey, Table, UserData, UserDataFields, UserDataMethods, Value};
+use mlua::{
+    Function, Lua, ObjectLike, RegistryKey, Table, UserData, UserDataFields, UserDataMethods, Value,
+};
 
 use crate::process::ProcessInfo;
 use crate::protocol::{PaneSnapshot, PanelCard, PanelView};
@@ -27,7 +29,6 @@ struct Kind {
     detect: RegistryKey,
     label: RegistryKey,
     state: Option<RegistryKey>,
-    agent: bool,
     color: Option<String>,
 }
 
@@ -51,7 +52,6 @@ pub struct Detection {
     pub kind: String,
     pub label: String,
     pub raw_state: Option<String>,
-    pub agent: bool,
     pub color: Option<String>,
 }
 
@@ -61,6 +61,7 @@ struct LuaPane {
     pid: i32,
     cwd: String,
     cwd_basename: String,
+    command: String,
     proc_tree: Vec<ProcessInfo>,
     window: String,
     session: String,
@@ -68,7 +69,7 @@ struct LuaPane {
     zoomed: bool,
     kind: String,
     label: String,
-    role: Option<String>,
+    tag: Option<String>,
     home: Option<String>,
     state: Option<String>,
 }
@@ -94,6 +95,7 @@ impl LuaRuntime {
             panes,
         };
         runtime.install_api()?;
+        runtime.load_prelude()?;
         Ok(runtime)
     }
 
@@ -107,6 +109,7 @@ impl LuaRuntime {
             pid: pane.pid,
             cwd: pane.cwd.clone(),
             cwd_basename: basename(&pane.cwd),
+            command: pane.command.clone(),
             proc_tree,
             window: pane.window.clone(),
             session: pane.session.clone(),
@@ -114,7 +117,7 @@ impl LuaRuntime {
             zoomed: pane.zoomed,
             kind: String::new(),
             label: String::new(),
-            role: pane.role.clone(),
+            tag: pane.tag.clone(),
             home: pane.home.clone(),
             state: pane.state.clone(),
         };
@@ -134,19 +137,15 @@ impl LuaRuntime {
                 let Ok(label) = label_fn.call::<String>(userdata.clone()) else {
                     continue;
                 };
-                let raw_state = if kind.agent {
-                    kind.state
-                        .as_ref()
-                        .and_then(|state_key| self.lua.registry_value::<Function>(state_key).ok())
-                        .and_then(|state_fn| state_fn.call::<String>(userdata.clone()).ok())
-                } else {
-                    None
-                };
+                let raw_state = kind
+                    .state
+                    .as_ref()
+                    .and_then(|state_key| self.lua.registry_value::<Function>(state_key).ok())
+                    .and_then(|state_fn| state_fn.call::<String>(userdata.clone()).ok());
                 return Ok(Some(Detection {
                     kind: kind.name.clone(),
                     label,
                     raw_state,
-                    agent: kind.agent,
                     color: kind.color.clone(),
                 }));
             }
@@ -162,39 +161,80 @@ impl LuaRuntime {
             .lua
             .create_function(move |lua, table: Table| {
                 let name: String = table.get("name")?;
-                let detect: Function = table.get("detect")?;
-                let label: Function = table.get("label")?;
+                let matcher: Option<String> = table.get("match")?;
+                let detect: Function = match table.get::<Option<Function>>("detect")? {
+                    Some(detect) => detect,
+                    None => match matcher {
+                        Some(pattern) => lua.create_function(move |_, pane: Value| match pane {
+                            Value::Table(table) => {
+                                let running: Function = table.get("running")?;
+                                running.call((table, pattern.clone()))
+                            }
+                            Value::UserData(userdata) => {
+                                userdata.call_method("running", pattern.clone())
+                            }
+                            _ => Ok(false),
+                        })?,
+                        None => {
+                            return Err(mlua::Error::RuntimeError(
+                                "kind requires detect or match".to_string(),
+                            ));
+                        }
+                    },
+                };
+                let label: Function = match table.get::<Option<Function>>("label")? {
+                    Some(label) => label,
+                    None => {
+                        let label = name.clone();
+                        lua.create_function(move |_, _pane: Value| Ok(label.clone()))?
+                    }
+                };
                 let detect = lua.create_registry_value(detect)?;
                 let label = lua.create_registry_value(label)?;
                 let state = table
                     .get::<Option<Function>>("state")?
                     .map(|state| lua.create_registry_value(state))
                     .transpose()?;
-                let agent = table.get::<Option<bool>>("agent")?.unwrap_or(false);
                 let color = table.get::<Option<String>>("color")?;
                 kinds.borrow_mut().push(Kind {
                     name,
                     detect,
                     label,
                     state,
-                    agent,
                     color,
                 });
                 Ok(())
             })
             .map_err(lua_err)?;
-        castr.set("register_kind", register_kind).map_err(lua_err)?;
+        castr
+            .set("register_kind", register_kind.clone())
+            .map_err(lua_err)?;
+        castr.set("kind", register_kind).map_err(lua_err)?;
 
         let commands = Rc::clone(&self.commands);
         let register_command = self
             .lua
-            .create_function(move |lua, table: Table| {
-                let name: String = table.get("name")?;
-                let handler: Function = table.get("handler")?;
+            .create_function(move |lua, args: mlua::MultiValue| {
+                let values = args.into_iter().collect::<Vec<_>>();
+                let (name, handler) = match values.as_slice() {
+                    [Value::Table(table)] => (table.get::<String>("name")?, table.get::<Function>("handler")?),
+                    [Value::String(name), Value::Function(handler)] => {
+                        (name.to_string_lossy(), handler.clone())
+                    }
+                    _ => {
+                        return Err(mlua::Error::RuntimeError(
+                            "expected castr.command{name=..., handler=...} or castr.command(name, fn)"
+                                .to_string(),
+                        ));
+                    }
+                };
                 let handler = lua.create_registry_value(handler)?;
                 commands.borrow_mut().insert(name, handler);
                 Ok(())
             })
+            .map_err(lua_err)?;
+        castr
+            .set("command", register_command.clone())
             .map_err(lua_err)?;
         castr
             .set("register_command", register_command)
@@ -212,10 +252,14 @@ impl LuaRuntime {
         castr.set("on", on).map_err(lua_err)?;
 
         let keybinds = Rc::clone(&self.keybinds);
+        let key_commands = Rc::clone(&self.commands);
+        let key_panes = Rc::clone(&self.panes);
+        let generated_key_command = Rc::new(Cell::new(0usize));
         let bind_key = self
             .lua
-            .create_function(move |_, args: mlua::MultiValue| {
-                let keybind = parse_bind_key(args)?;
+            .create_function(move |lua, args: mlua::MultiValue| {
+                let keybind =
+                    parse_bind_key(lua, &key_commands, &key_panes, &generated_key_command, args)?;
                 keybinds.borrow_mut().push(keybind);
                 Ok(())
             })
@@ -236,6 +280,9 @@ impl LuaRuntime {
                 });
                 Ok(())
             })
+            .map_err(lua_err)?;
+        castr
+            .set("panel", register_panel.clone())
             .map_err(lua_err)?;
         castr
             .set("register_panel", register_panel)
@@ -268,6 +315,11 @@ impl LuaRuntime {
             .set_name(name)
             .exec()
             .map_err(|error| anyhow!("{error}"))
+    }
+
+    fn load_prelude(&self) -> Result<()> {
+        self.load_source("prelude.lua", PRELUDE)
+            .map_err(|error| anyhow!("failed to load Lua prelude: {error}"))
     }
 
     pub fn load_builtins(&self) -> Result<()> {
@@ -378,25 +430,40 @@ impl LuaRuntime {
 
 pub fn user_plugin_files() -> Vec<PathBuf> {
     let config = config_dir();
+    ensure_starter_config(&config);
     let mut files = Vec::new();
-    for dir in [
-        config.clone(),
-        config.join("kinds"),
-        config.join("panels"),
-        config.join("commands"),
-    ] {
-        let Ok(entries) = fs::read_dir(dir) else {
-            continue;
-        };
-        files.extend(
-            entries
-                .filter_map(std::result::Result::ok)
-                .map(|entry| entry.path())
-                .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("lua")),
-        );
-    }
+    collect_lua_files(&config, &mut files);
     files.sort();
     files
+}
+
+fn ensure_starter_config(config: &Path) {
+    let mut existing = Vec::new();
+    collect_lua_files(config, &mut existing);
+    if !existing.is_empty() {
+        return;
+    }
+    if fs::create_dir_all(config).is_err() {
+        return;
+    }
+    for (name, source) in STARTER_FILES {
+        let _ = fs::write(config.join(name), source);
+    }
+}
+
+fn collect_lua_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.filter_map(std::result::Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_lua_files(&path, files);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("lua") {
+            files.push(path);
+        }
+    }
 }
 
 fn parse_panel_cards(cards: Table) -> mlua::Result<Vec<PanelCard>> {
@@ -408,7 +475,7 @@ fn parse_panel_cards(cards: Table) -> mlua::Result<Vec<PanelCard>> {
                 title: card.get("title")?,
                 subtitle: card.get("subtitle")?,
                 state: card.get("state")?,
-                role: card.get("role")?,
+                tag: card.get("tag")?,
                 pane: card.get("pane")?,
                 enter: parse_optional_command(card.get("enter")?)?,
                 expand: parse_optional_command(card.get("expand")?)?,
@@ -424,13 +491,19 @@ fn parse_optional_command(value: Value) -> mlua::Result<Option<Vec<String>>> {
     }
 }
 
-fn parse_bind_key(args: mlua::MultiValue) -> mlua::Result<Keybind> {
+fn parse_bind_key(
+    lua: &Lua,
+    commands: &Rc<RefCell<HashMap<String, RegistryKey>>>,
+    panes: &Rc<RefCell<Vec<PaneSnapshot>>>,
+    generated: &Rc<Cell<usize>>,
+    args: mlua::MultiValue,
+) -> mlua::Result<Keybind> {
     let values = args.into_iter().collect::<Vec<_>>();
     match values.as_slice() {
         [key, command] => Ok(Keybind {
             mode: "prefix".to_string(),
             key: value_to_string(key, "key")?,
-            command: parse_keybind_command(command.clone())?,
+            command: parse_bind_command_value(lua, commands, panes, generated, command.clone())?,
             context: true,
             popup: false,
         }),
@@ -439,7 +512,7 @@ fn parse_bind_key(args: mlua::MultiValue) -> mlua::Result<Keybind> {
             Ok(Keybind {
                 mode: "prefix".to_string(),
                 key: value_to_string(key, "key")?,
-                command: parse_keybind_command(command.clone())?,
+                command: parse_bind_command_value(lua, commands, panes, generated, command.clone())?,
                 context,
                 popup,
             })
@@ -447,7 +520,7 @@ fn parse_bind_key(args: mlua::MultiValue) -> mlua::Result<Keybind> {
         [mode, key, command] => Ok(Keybind {
             mode: value_to_string(mode, "mode")?,
             key: value_to_string(key, "key")?,
-            command: parse_keybind_command(command.clone())?,
+            command: parse_bind_command_value(lua, commands, panes, generated, command.clone())?,
             context: true,
             popup: false,
         }),
@@ -456,7 +529,7 @@ fn parse_bind_key(args: mlua::MultiValue) -> mlua::Result<Keybind> {
             Ok(Keybind {
                 mode: value_to_string(mode, "mode")?,
                 key: value_to_string(key, "key")?,
-                command: parse_keybind_command(command.clone())?,
+                command: parse_bind_command_value(lua, commands, panes, generated, command.clone())?,
                 context,
                 popup,
             })
@@ -465,6 +538,36 @@ fn parse_bind_key(args: mlua::MultiValue) -> mlua::Result<Keybind> {
             "expected castr.bind_key(key, command[, opts]) or castr.bind_key(table, key, command[, opts])"
                 .to_string(),
         )),
+    }
+}
+
+fn parse_bind_command_value(
+    lua: &Lua,
+    commands: &Rc<RefCell<HashMap<String, RegistryKey>>>,
+    panes: &Rc<RefCell<Vec<PaneSnapshot>>>,
+    generated: &Rc<Cell<usize>>,
+    value: Value,
+) -> mlua::Result<Vec<String>> {
+    match value {
+        Value::Function(function) => {
+            let idx = generated.get() + 1;
+            generated.set(idx);
+            let name = format!("__castr_key_{idx}");
+            let panes = Rc::clone(panes);
+            let handler = lua.create_function(move |lua, args: Table| {
+                let pane = args
+                    .get::<Option<String>>(1)?
+                    .map(|id| pane_from_snapshot_or_id(lua, &panes.borrow(), &id))
+                    .transpose()?
+                    .unwrap_or(Value::Nil);
+                function.call::<Value>((pane, args))
+            })?;
+            commands
+                .borrow_mut()
+                .insert(name.clone(), lua.create_registry_value(handler)?);
+            Ok(vec![name])
+        }
+        other => parse_keybind_command(other),
     }
 }
 
@@ -520,8 +623,20 @@ pub(crate) fn config_dir() -> PathBuf {
 fn pane_ref_table(lua: &Lua, pane_id: &str) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set("id", pane_id)?;
-    add_pane_table_methods(lua, &table, pane_id)?;
+    add_pane_table_methods(lua, &table, pane_id, Vec::new())?;
     Ok(table)
+}
+
+fn pane_from_snapshot_or_id(
+    lua: &Lua,
+    panes: &[PaneSnapshot],
+    pane_id: &str,
+) -> mlua::Result<Value> {
+    panes
+        .iter()
+        .find(|pane| pane.id == pane_id)
+        .map(|pane| snapshot_table(lua, pane).map(Value::Table))
+        .unwrap_or_else(|| pane_ref_table(lua, pane_id).map(Value::Table))
 }
 
 fn snapshots_table(lua: &Lua, panes: &[PaneSnapshot]) -> mlua::Result<Table> {
@@ -539,18 +654,25 @@ fn snapshot_table(lua: &Lua, pane: &PaneSnapshot) -> mlua::Result<Table> {
     table.set("kind", pane.kind.clone())?;
     table.set("label", pane.label.clone())?;
     table.set("cwd", pane.cwd.clone())?;
+    table.set("cwd_basename", pane.cwd_basename.clone())?;
+    table.set("command", pane.command.clone())?;
     table.set("session", pane.session.clone())?;
     table.set("window", pane.window.clone())?;
     table.set("active", pane.active)?;
     table.set("zoomed", pane.zoomed)?;
-    table.set("role", pane.role.clone())?;
+    table.set("tag", pane.tag.clone())?;
     table.set("home", pane.home.clone())?;
     table.set("state", pane.state.clone())?;
-    add_pane_table_methods(lua, &table, &pane.id)?;
+    add_pane_table_methods(lua, &table, &pane.id, pane.processes.clone())?;
     Ok(table)
 }
 
-fn add_pane_table_methods(lua: &Lua, table: &Table, pane_id: &str) -> mlua::Result<()> {
+fn add_pane_table_methods(
+    lua: &Lua,
+    table: &Table,
+    pane_id: &str,
+    processes: Vec<ProcessInfo>,
+) -> mlua::Result<()> {
     let id = pane_id.to_string();
     table.set(
         "var",
@@ -573,11 +695,25 @@ fn add_pane_table_methods(lua: &Lua, table: &Table, pane_id: &str) -> mlua::Resu
         })?,
     )?;
 
+    let tree = processes.clone();
+    table.set(
+        "proc_tree",
+        lua.create_function(move |_, _self: Table| Ok(LuaProcTree(tree.clone())))?,
+    )?;
+
+    let tree = processes;
+    table.set(
+        "running",
+        lua.create_function(move |_, (_self, pattern): (Table, String)| {
+            Ok(process_running(&tree, &pattern))
+        })?,
+    )?;
+
     Ok(())
 }
 
 fn set_pane_fields(pane_id: &str, table: Table) -> mlua::Result<()> {
-    for name in ["kind", "label", "state", "role", "home"] {
+    for name in ["kind", "label", "state", "tag", "home"] {
         if let Some(value) = table.get::<Option<String>>(name)? {
             tmux::set_pane_var(pane_id, &format!("@castr_{name}"), &value)
                 .map_err(mlua_external)?;
@@ -594,7 +730,8 @@ fn tmux_api(lua: &Lua) -> Result<Table> {
     table
         .set(
             "select",
-            lua.create_function(|_, pane_id: String| {
+            lua.create_function(|_, pane: Value| {
+                let pane_id = pane_id_from_value(pane)?;
                 tmux::select_pane(&pane_id).map_err(mlua_external)
             })
             .map_err(lua_err)?,
@@ -603,14 +740,25 @@ fn tmux_api(lua: &Lua) -> Result<Table> {
     table
         .set(
             "zoom",
-            lua.create_function(|_, pane_id: String| tmux::zoom(&pane_id).map_err(mlua_external))
+            lua.create_function(|_, pane: Value| {
+                let pane_id = pane_id_from_value(pane)?;
+                tmux::zoom(&pane_id).map_err(mlua_external)
+            })
+            .map_err(lua_err)?,
+        )
+        .map_err(lua_err)?;
+    table
+        .set(
+            "unzoom",
+            lua.create_function(|_, target: String| tmux::unzoom(&target).map_err(mlua_external))
                 .map_err(lua_err)?,
         )
         .map_err(lua_err)?;
     table
         .set(
             "capture",
-            lua.create_function(|_, pane_id: String| {
+            lua.create_function(|_, pane: Value| {
+                let pane_id = pane_id_from_value(pane)?;
                 tmux::capture(&pane_id).map_err(mlua_external)
             })
             .map_err(lua_err)?,
@@ -619,7 +767,8 @@ fn tmux_api(lua: &Lua) -> Result<Table> {
     table
         .set(
             "kill_pane",
-            lua.create_function(|_, pane_id: String| {
+            lua.create_function(|_, pane: Value| {
+                let pane_id = pane_id_from_value(pane)?;
                 tmux::kill_pane(&pane_id).map_err(mlua_external)
             })
             .map_err(lua_err)?,
@@ -675,14 +824,16 @@ fn tmux_api(lua: &Lua) -> Result<Table> {
             "split",
             lua.create_function(|_, opts: Table| {
                 let target: String = opts.get("target")?;
-                let direction = match opts.get::<Option<String>>("direction")?.as_deref() {
-                    Some("v") | Some("vertical") => tmux::SplitDirection::Vertical,
-                    _ => tmux::SplitDirection::Horizontal,
-                };
+                let dir = opts
+                    .get::<Option<String>>("dir")?
+                    .or(opts.get::<Option<String>>("direction")?)
+                    .unwrap_or_else(|| "right".to_string());
+                let (direction, before) = split_direction(&dir)?;
                 tmux::split(
                     &target,
                     tmux::SplitOptions {
                         direction,
+                        before: before || opts.get::<Option<bool>>("before")?.unwrap_or(false),
                         size: opts.get("size")?,
                         cwd: opts.get("cwd")?,
                         command: opts.get("command")?,
@@ -771,6 +922,18 @@ fn tmux_api(lua: &Lua) -> Result<Table> {
     Ok(table)
 }
 
+fn split_direction(dir: &str) -> mlua::Result<(tmux::SplitDirection, bool)> {
+    match dir {
+        "right" | "h" | "horizontal" => Ok((tmux::SplitDirection::Horizontal, false)),
+        "left" => Ok((tmux::SplitDirection::Horizontal, true)),
+        "below" | "down" | "v" | "vertical" => Ok((tmux::SplitDirection::Vertical, false)),
+        "above" | "up" => Ok((tmux::SplitDirection::Vertical, true)),
+        other => Err(mlua::Error::RuntimeError(format!(
+            "unknown split dir: {other}"
+        ))),
+    }
+}
+
 fn with_pane_fn(lua: &Lua) -> Result<Function> {
     lua.create_function(|_, (pane, opts, body): (Value, Table, Function)| {
         let pane_id = pane_id_from_value(pane)?;
@@ -843,13 +1006,14 @@ impl UserData for LuaPane {
         fields.add_field_method_get("pid", |_, this| Ok(this.pid));
         fields.add_field_method_get("cwd", |_, this| Ok(this.cwd.clone()));
         fields.add_field_method_get("cwd_basename", |_, this| Ok(this.cwd_basename.clone()));
+        fields.add_field_method_get("command", |_, this| Ok(this.command.clone()));
         fields.add_field_method_get("window", |_, this| Ok(this.window.clone()));
         fields.add_field_method_get("session", |_, this| Ok(this.session.clone()));
         fields.add_field_method_get("active", |_, this| Ok(this.active));
         fields.add_field_method_get("zoomed", |_, this| Ok(this.zoomed));
         fields.add_field_method_get("kind", |_, this| Ok(this.kind.clone()));
         fields.add_field_method_get("label", |_, this| Ok(this.label.clone()));
-        fields.add_field_method_get("role", |_, this| Ok(this.role.clone()));
+        fields.add_field_method_get("tag", |_, this| Ok(this.tag.clone()));
         fields.add_field_method_get("home", |_, this| Ok(this.home.clone()));
         fields.add_field_method_get("state", |_, this| Ok(this.state.clone()));
     }
@@ -857,6 +1021,9 @@ impl UserData for LuaPane {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("proc_tree", |_, this, ()| {
             Ok(LuaProcTree(this.proc_tree.clone()))
+        });
+        methods.add_method("running", |_, this, pattern: String| {
+            Ok(process_running(&this.proc_tree, &pattern))
         });
         methods.add_method("var", |_, this, name: String| {
             tmux::get_pane_var(&this.id, &name).map_err(mlua_external)
@@ -896,6 +1063,25 @@ fn lua_err(error: mlua::Error) -> anyhow::Error {
     anyhow!(error.to_string())
 }
 
+fn process_running(processes: &[ProcessInfo], name: &str) -> bool {
+    processes
+        .iter()
+        .any(|process| argv_has_command(&process.argv, name))
+}
+
+fn argv_has_command(argv: &str, name: &str) -> bool {
+    argv.split_whitespace()
+        .any(|token| command_matches(token, name))
+}
+
+fn command_matches(token: &str, name: &str) -> bool {
+    token == name
+        || std::path::Path::new(token)
+            .file_name()
+            .and_then(|part| part.to_str())
+            == Some(name)
+}
+
 fn process_table(lua: &Lua, process: &ProcessInfo) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set("pid", process.pid)?;
@@ -913,13 +1099,202 @@ fn basename(path: &str) -> String {
         .to_string()
 }
 
-const BUILTIN_KINDS: &str = r#"
-local function argv_has(p, pattern)
-  return p:proc_tree():any(function(x)
-    return x.argv:match(pattern) ~= nil
-  end)
+const PRELUDE: &str = r#"
+castr._pane_defs = {}
+
+function castr.register_pane(name, opts)
+  opts.tag = opts.tag or name
+  opts.name = opts.name or name
+  castr._pane_defs[name] = opts
+  return opts
 end
 
+local function pane_opts(opts)
+  if type(opts) == "string" then return castr._pane_defs[opts] end
+  return opts
+end
+
+function castr.find(query)
+  for _, pane in ipairs(castr.panes()) do
+    local ok = true
+    for key, expected in pairs(query) do
+      if pane[key] ~= expected then
+        ok = false
+        break
+      end
+    end
+    if ok then return pane end
+  end
+end
+
+function castr.find_all(query)
+  local found = {}
+  for _, pane in ipairs(castr.panes()) do
+    local ok = true
+    for key, expected in pairs(query) do
+      if pane[key] ~= expected then
+        ok = false
+        break
+      end
+    end
+    if ok then found[#found + 1] = pane end
+  end
+  return found
+end
+
+function castr.resolve(target)
+  if type(target) == "string" then return target end
+  if target and target.id then return target.id end
+  local pane = castr.find(target)
+  return pane and pane.id
+end
+
+function castr.split(pane, opts)
+  local id = castr.tmux.split {
+    target = castr.resolve(pane),
+    dir = opts.dir or opts.direction,
+    size = opts.size,
+    cwd = opts.cwd,
+    command = opts.command,
+    detached = opts.detached,
+  }
+  local created = castr.pane(id)
+  if opts.tag then created:set { tag = opts.tag } end
+  return created
+end
+
+local function companion_query(from, opts)
+  return { tag = opts.tag, window = from.window, home = from.window }
+end
+
+local function companion_horizontal(opts)
+  return opts.horizontal ~= nil and opts.horizontal or opts.dir == "right" or opts.dir == "left" or opts.dir == "h" or opts.dir == "horizontal"
+end
+
+local function show_companion(from, opts)
+  local visible = castr.find(companion_query(from, opts))
+  if visible then return visible end
+
+  local hidden = castr.find { session = "__pi-hidden-" .. from.window, tag = opts.tag, home = from.window }
+  if hidden then
+    castr.tmux.unstash {
+      pane = hidden.id,
+      target = from.id,
+      horizontal = companion_horizontal(opts),
+      size = opts.size,
+    }
+    castr.tmux.select(hidden.id)
+    return hidden
+  end
+
+  local pane = castr.split(from, {
+    dir = opts.dir,
+    size = opts.size,
+    cwd = from.cwd,
+    command = opts.command,
+    detached = true,
+    tag = opts.tag,
+  })
+  pane:set { home = from.window, title = opts.title, label = opts.label }
+  castr.tmux.select(pane.id)
+  return pane
+end
+
+local raw_toggle = function(target)
+  local id = castr.resolve(target)
+  if not id then return false end
+  castr.tmux.zoom(id)
+  return true
+end
+
+function castr.toggle(target, opts)
+  if not opts then return raw_toggle(target) end
+  opts = pane_opts(opts)
+  if not opts then return false end
+
+  local visible = castr.find(companion_query(target, opts))
+  if not visible then
+    show_companion(target, opts)
+    return true
+  end
+
+  if visible.state == "blocked" and opts.blocked_message then
+    castr.tmux.display { target = visible.id, message = opts.blocked_message }
+    return false
+  end
+
+  castr.tmux.stash {
+    pane = visible.id,
+    window = target.window,
+    cwd = target.cwd,
+    name = opts.name or opts.tag,
+  }
+  return true
+end
+
+function castr.expand(target, opts)
+  if opts then
+    opts = pane_opts(opts)
+    if not opts then return false end
+    target = show_companion(target, opts)
+  end
+
+  local id = castr.resolve(target)
+  if not id then return false end
+
+  local window = castr.tmux.window_id(id)
+  if castr.tmux.is_zoomed(window) and castr.tmux.active_pane(window) == id then
+    castr.tmux.unzoom(window)
+    return true
+  end
+
+  castr.tmux.unzoom(window)
+  castr.tmux.select(id)
+  castr.tmux.zoom(id)
+  return true
+end
+"#;
+
+const STARTER_FILES: &[(&str, &str)] = &[
+    (
+        "10-psql.lua",
+        r#"castr.kind { name = "psql", match = "psql" }
+"#,
+    ),
+    (
+        "20-hello.lua",
+        r#"castr.command {
+  name = "hello",
+  handler = function()
+    return "hi"
+  end,
+}
+"#,
+    ),
+    (
+        "30-panel.lua",
+        r#"castr.panel {
+  id = "panes",
+  title = "Panes",
+  cards = function()
+    local cards = {}
+    for _, p in ipairs(castr.panes()) do
+      cards[#cards + 1] = {
+        title = p.label,
+        subtitle = p.window,
+        state = p.state,
+        tag = p.tag or p.kind,
+        pane = p.id,
+      }
+    end
+    return cards
+  end,
+}
+"#,
+    ),
+];
+
+const BUILTIN_KINDS: &str = r#"
 local function agent_state(p)
   local pushed = p:var("@castr_push_state")
   if pushed == "blocked" then return "blocked" end
@@ -928,68 +1303,50 @@ local function agent_state(p)
   return "idle"
 end
 
-castr.register_kind {
+castr.kind {
   name = "pi",
   detect = function(p)
-    return argv_has(p, "pi%-coding%-agent")
-        or argv_has(p, "@earendil%-works/pi")
-        or argv_has(p, "^pi$")
-        or argv_has(p, "^pi%s")
-        or argv_has(p, "/pi$")
-        or argv_has(p, "/pi%s")
+    return p:running("pi-coding-agent")
+        or p:running("@earendil-works/pi")
+        or p:running("pi")
   end,
   label = function(_p)
     return "pi"
   end,
-  agent = true,
   color = "yellow",
   state = agent_state,
 }
 
-castr.register_kind {
-  name = "nvim",
-  detect = function(p)
-    return argv_has(p, "nvim") or argv_has(p, "vim")
-  end,
-  label = function(_p)
-    return "nvim"
-  end,
-}
+castr.kind { name = "nvim", match = "nvim" }
 
-castr.register_kind {
+castr.kind {
   name = "claude",
-  detect = function(p)
-    return argv_has(p, "claude")
-  end,
+  match = "claude",
   label = function(_p)
     return "claude"
   end,
-  agent = true,
   color = "yellow",
   state = agent_state,
 }
 
-castr.register_kind {
+castr.kind {
   name = "copilot",
-  detect = function(p)
-    return argv_has(p, "copilot")
-  end,
+  match = "copilot",
   label = function(_p)
     return "copilot"
   end,
-  agent = true,
   color = "yellow",
   state = agent_state,
 }
 
-castr.register_kind {
-  name = "term",
+castr.kind {
+  name = "pane",
   detect = function(_p)
     return true
   end,
   label = function(p)
-    if p.role == "terminal" then return "bottom" end
-    return "term"
+    if p.tag == "terminal" then return "bottom" end
+    return p.command
   end,
 }
 "#;
@@ -1005,19 +1362,83 @@ mod tests {
             kind: "term".to_string(),
             label: "term · castr".to_string(),
             cwd: "/tmp/castr".to_string(),
+            cwd_basename: "castr".to_string(),
+            command: "zsh".to_string(),
             session: "s".to_string(),
             window: "@1".to_string(),
             active: true,
             zoomed: false,
-            role: Some("terminal".to_string()),
+            tag: Some("terminal".to_string()),
             home: Some("@1".to_string()),
             state: Some("idle".to_string()),
+            processes: vec![ProcessInfo {
+                pid: 123,
+                ppid: 1,
+                argv: "zsh".to_string(),
+            }],
         }
     }
 
     fn runtime() -> (LuaRuntime, Rc<RefCell<Vec<PaneSnapshot>>>) {
         let panes = Rc::new(RefCell::new(Vec::new()));
         (LuaRuntime::new(Rc::clone(&panes)).unwrap(), panes)
+    }
+
+    #[test]
+    fn ensure_starter_config_writes_files_only_when_empty() {
+        let root = std::env::temp_dir().join(format!("castr-starter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        ensure_starter_config(&root);
+        let mut files = Vec::new();
+        collect_lua_files(&root, &mut files);
+        assert_eq!(files.len(), STARTER_FILES.len());
+
+        std::fs::write(root.join("custom.lua"), "-- custom").unwrap();
+        ensure_starter_config(&root);
+        let mut files = Vec::new();
+        collect_lua_files(&root, &mut files);
+        assert_eq!(files.len(), STARTER_FILES.len() + 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn collect_lua_files_recurses_under_config_dir() {
+        let root = std::env::temp_dir().join(format!("castr-lua-files-{}", std::process::id()));
+        let nested = root.join("anywhere/deeper");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(root.join("a.lua"), "").unwrap();
+        std::fs::write(nested.join("b.lua"), "").unwrap();
+        std::fs::write(nested.join("ignore.txt"), "").unwrap();
+
+        let mut files = Vec::new();
+        collect_lua_files(&root, &mut files);
+        files.sort();
+        let names = files
+            .iter()
+            .map(|path| path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["a.lua", "b.lua"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn split_direction_maps_user_words() {
+        assert!(matches!(
+            split_direction("below").unwrap(),
+            (tmux::SplitDirection::Vertical, false)
+        ));
+        assert!(matches!(
+            split_direction("above").unwrap(),
+            (tmux::SplitDirection::Vertical, true)
+        ));
+        assert!(matches!(
+            split_direction("right").unwrap(),
+            (tmux::SplitDirection::Horizontal, false)
+        ));
+        assert!(matches!(
+            split_direction("left").unwrap(),
+            (tmux::SplitDirection::Horizontal, true)
+        ));
     }
 
     #[test]
@@ -1063,6 +1484,107 @@ mod tests {
     }
 
     #[test]
+    fn register_pane_stores_reusable_config_without_overloading_pane_handle() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                castr.register_pane("agent", { command = "pi" })
+                castr.command("check", function()
+                  local pane = castr.pane("%1")
+                  local cfg = castr._pane_defs.agent
+                  return pane.id .. ":" .. cfg.tag .. ":" .. cfg.name
+                end)
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime.run_command("check", &[]).unwrap().as_deref(),
+            Some("%1:agent:agent")
+        );
+    }
+
+    #[test]
+    fn user_config_can_override_prelude_helpers() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                function castr.expand()
+                  return "custom"
+                end
+                castr.command("check", function()
+                  return castr.expand()
+                end)
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime.run_command("check", &[]).unwrap().as_deref(),
+            Some("custom")
+        );
+    }
+
+    #[test]
+    fn find_and_find_all_match_query_fields() {
+        let (runtime, panes) = runtime();
+        panes.borrow_mut().push(pane("%1"));
+        let mut second = pane("%2");
+        second.tag = Some("agent".to_string());
+        second.window = "@2".to_string();
+        panes.borrow_mut().push(second);
+
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                castr.command("query", function()
+                  local one = castr.find{ tag = "agent" }
+                  local all = castr.find_all{ active = true }
+                  return one.id .. ":" .. #all
+                end)
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime.run_command("query", &[]).unwrap().as_deref(),
+            Some("%2:2")
+        );
+    }
+
+    #[test]
+    fn bind_key_accepts_function_and_registers_internal_command() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                castr.bind_key("root", "M-e", function()
+                  return "ok"
+                end)
+                "#,
+            )
+            .unwrap();
+
+        let keybind = &runtime.keybinds()[0];
+        assert_eq!(keybind.mode, "root");
+        assert_eq!(keybind.key, "M-e");
+        assert_eq!(keybind.command, ["__castr_key_1"]);
+        assert_eq!(
+            runtime
+                .run_command("__castr_key_1", &[])
+                .unwrap()
+                .as_deref(),
+            Some("ok")
+        );
+    }
+
+    #[test]
     fn registered_panel_renders_cards() {
         let (runtime, panes) = runtime();
         panes.borrow_mut().push(pane("%1"));
@@ -1075,7 +1597,7 @@ mod tests {
                   title = "Workspace",
                   cards = function()
                     local p = castr.panes()[1]
-                    return {{ title = p.label, subtitle = p.window, state = p.state, role = p.role, pane = p.id }}
+                    return {{ title = p.label, subtitle = p.window, state = p.state, tag = p.tag, pane = p.id }}
                   end,
                 }
                 "#,
@@ -1086,6 +1608,33 @@ mod tests {
         assert_eq!(panels.len(), 1);
         assert_eq!(panels[0].id, "workspace");
         assert_eq!(panels[0].cards[0].pane.as_deref(), Some("%1"));
+    }
+
+    #[test]
+    fn short_command_and_panel_names_are_primary_api() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                castr.command {
+                  name = "hello",
+                  handler = function() return "hi" end,
+                }
+                castr.panel {
+                  id = "main",
+                  title = "Main",
+                  cards = function() return {} end,
+                }
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime.run_command("hello", &[]).unwrap().as_deref(),
+            Some("hi")
+        );
+        assert_eq!(runtime.render_panels().unwrap()[0].id, "main");
     }
 
     #[test]
@@ -1128,6 +1677,69 @@ mod tests {
 
         let error = runtime.run_command("boom", &[]).unwrap_err().to_string();
         assert!(error.contains("nope"));
+    }
+
+    #[test]
+    fn running_matches_exact_token_or_basename_not_substrings() {
+        let processes = vec![
+            ProcessInfo {
+                pid: 1,
+                ppid: 0,
+                argv: "pip install thing".to_string(),
+            },
+            ProcessInfo {
+                pid: 2,
+                ppid: 0,
+                argv: "compile pi".to_string(),
+            },
+            ProcessInfo {
+                pid: 3,
+                ppid: 0,
+                argv: "/usr/bin/psql -h localhost".to_string(),
+            },
+        ];
+
+        assert!(!process_running(&processes[..1], "pi"));
+        assert!(process_running(&processes, "pi"));
+        assert!(process_running(&processes, "psql"));
+        assert!(!process_running(&processes, "sql"));
+    }
+
+    #[test]
+    fn declarative_kind_match_uses_running_helper_and_default_label() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"castr.kind { name = "shell", match = "zsh" }"#,
+            )
+            .unwrap();
+
+        let detected = runtime
+            .detect(
+                &PaneInfo {
+                    id: "%1".to_string(),
+                    pid: 1,
+                    cwd: "/tmp/work".to_string(),
+                    command: "zsh".to_string(),
+                    session: "s".to_string(),
+                    window: "@1".to_string(),
+                    active: true,
+                    zoomed: false,
+                    tag: None,
+                    home: None,
+                    state: None,
+                },
+                vec![ProcessInfo {
+                    pid: 1,
+                    ppid: 0,
+                    argv: "zsh".to_string(),
+                }],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(detected.kind, "shell");
+        assert_eq!(detected.label, "shell");
     }
 
     #[test]
@@ -1190,7 +1802,7 @@ mod tests {
                   name = "pane_id",
                   handler = function()
                     local panes = castr.panes()
-                    return panes[1].id .. ":" .. panes[1].kind .. ":" .. panes[1].pid .. ":" .. panes[1].role .. ":" .. panes[1].home .. ":" .. panes[1].state
+                    return panes[1].id .. ":" .. panes[1].kind .. ":" .. panes[1].pid .. ":" .. panes[1].tag .. ":" .. panes[1].home .. ":" .. panes[1].state
                   end,
                 }
                 "#,
@@ -1221,6 +1833,29 @@ mod tests {
 
         let out = runtime.run_command("method_types", &[]).unwrap();
         assert_eq!(out.as_deref(), Some("%9:function:function:function"));
+    }
+
+    #[test]
+    fn pane_tables_expose_running_and_proc_tree() {
+        let (runtime, panes) = runtime();
+        panes.borrow_mut().push(pane("%1"));
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                castr.register_command{
+                  name = "running",
+                  handler = function()
+                    local p = castr.panes()[1]
+                    return tostring(p:running("zsh")) .. ":" .. p:proc_tree():list()[1].argv .. ":" .. p.cwd_basename
+                  end,
+                }
+                "#,
+            )
+            .unwrap();
+
+        let out = runtime.run_command("running", &[]).unwrap();
+        assert_eq!(out.as_deref(), Some("true:zsh:castr"));
     }
 
     #[test]
@@ -1320,11 +1955,12 @@ mod tests {
                     id: "%1".to_string(),
                     pid: 1,
                     cwd: "/tmp/work".to_string(),
+                    command: "zsh".to_string(),
                     session: "s".to_string(),
                     window: "@1".to_string(),
                     active: true,
                     zoomed: false,
-                    role: None,
+                    tag: None,
                     home: None,
                     state: None,
                 },

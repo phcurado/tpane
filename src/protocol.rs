@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::process::ProcessInfo;
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
@@ -24,13 +26,16 @@ pub struct PaneSnapshot {
     pub kind: String,
     pub label: String,
     pub cwd: String,
+    pub cwd_basename: String,
+    pub command: String,
     pub session: String,
     pub window: String,
     pub active: bool,
     pub zoomed: bool,
-    pub role: Option<String>,
+    pub tag: Option<String>,
     pub home: Option<String>,
     pub state: Option<String>,
+    pub processes: Vec<ProcessInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -45,7 +50,7 @@ pub struct PanelCard {
     pub title: String,
     pub subtitle: Option<String>,
     pub state: Option<String>,
-    pub role: Option<String>,
+    pub tag: Option<String>,
     pub pane: Option<String>,
     pub enter: Option<Vec<String>>,
     pub expand: Option<Vec<String>>,

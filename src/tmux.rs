@@ -7,11 +7,12 @@ pub struct PaneInfo {
     pub id: String,
     pub pid: i32,
     pub cwd: String,
+    pub command: String,
     pub session: String,
     pub window: String,
     pub active: bool,
     pub zoomed: bool,
-    pub role: Option<String>,
+    pub tag: Option<String>,
     pub home: Option<String>,
     pub state: Option<String>,
 }
@@ -71,7 +72,7 @@ pub fn list_panes() -> Result<Vec<PaneInfo>> {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{session_name}\t#{window_id}\t#{pane_active}\t#{window_zoomed_flag}\t#{@castr_role}\t#{@castr_home}\t#{@castr_state}",
+        "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{session_name}\t#{window_id}\t#{pane_active}\t#{window_zoomed_flag}\t#{@castr_tag}\t#{@castr_home}\t#{@castr_state}",
     ])?;
 
     output
@@ -82,7 +83,7 @@ pub fn list_panes() -> Result<Vec<PaneInfo>> {
 }
 
 fn parse_pane_info(line: &str) -> Result<PaneInfo> {
-    let mut parts = line.splitn(11, '\t');
+    let mut parts = line.splitn(12, '\t');
     let id = parts
         .next()
         .ok_or_else(|| anyhow!("missing pane id in tmux output"))?
@@ -93,22 +94,24 @@ fn parse_pane_info(line: &str) -> Result<PaneInfo> {
         .parse::<i32>()
         .with_context(|| format!("invalid pane pid in tmux output: {line}"))?;
     let cwd = parts.next().unwrap_or_default().to_string();
+    let command = parts.next().unwrap_or_default().to_string();
     let session = parts.next().unwrap_or_default().to_string();
     let window = parts.next().unwrap_or_default().to_string();
     let active = parts.next() == Some("1");
     let zoomed = parts.next() == Some("1");
-    let role = nonempty(parts.next().unwrap_or_default());
+    let tag = nonempty(parts.next().unwrap_or_default());
     let home = nonempty(parts.next().unwrap_or_default());
     let state = nonempty(parts.next().unwrap_or_default());
     Ok(PaneInfo {
         id,
         pid,
         cwd,
+        command,
         session,
         window,
         active,
         zoomed,
-        role,
+        tag,
         home,
         state,
     })
@@ -213,6 +216,7 @@ fn pane_title_args(pane_id: &str, title: &str) -> Vec<String> {
 
 pub struct SplitOptions {
     pub direction: SplitDirection,
+    pub before: bool,
     pub size: Option<String>,
     pub cwd: Option<String>,
     pub command: Option<String>,
@@ -225,6 +229,7 @@ pub enum SplitDirection {
 }
 
 pub fn split(target: &str, opts: SplitOptions) -> Result<String> {
+    unzoom(target)?;
     tmux_owned(split_args(target, &opts))
 }
 
@@ -240,6 +245,9 @@ fn split_args(target: &str, opts: &SplitOptions) -> Vec<String> {
     match opts.direction {
         SplitDirection::Horizontal => args.push("-h".to_string()),
         SplitDirection::Vertical => args.push("-v".to_string()),
+    }
+    if opts.before {
+        args.push("-b".to_string());
     }
     if opts.detached {
         args.push("-d".to_string());
@@ -295,6 +303,7 @@ pub struct StashOptions {
 }
 
 pub fn stash(opts: StashOptions) -> Result<()> {
+    unzoom(&opts.window)?;
     let session = hidden_session(&opts.window);
     let created = !has_session(&session);
     if created {
@@ -315,6 +324,7 @@ pub struct UnstashOptions {
 }
 
 pub fn unstash(opts: UnstashOptions) -> Result<()> {
+    unzoom(&opts.target)?;
     join(
         &opts.pane,
         &opts.target,
@@ -392,6 +402,15 @@ pub fn zoom(pane: &str) -> Result<()> {
     tmux(&["resize-pane", "-Z", "-t", pane]).map(|_| ())
 }
 
+pub fn unzoom(target: &str) -> Result<bool> {
+    if !is_zoomed(target)? {
+        return Ok(false);
+    }
+    let active = active_pane(target)?;
+    zoom(&active)?;
+    Ok(true)
+}
+
 pub fn is_zoomed(target: &str) -> Result<bool> {
     Ok(tmux(&[
         "display-message",
@@ -463,25 +482,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_pane_info_reads_window_id_role_and_home() {
+    fn parse_pane_info_reads_window_id_tag_and_home() {
         let pane =
-            parse_pane_info("%1\t42\t/tmp/work\tmain\t@7\t1\t0\tagent\t@7\tblocked").unwrap();
+            parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t1\t0\tagent\t@7\tblocked").unwrap();
         assert_eq!(pane.id, "%1");
         assert_eq!(pane.pid, 42);
+        assert_eq!(pane.command, "zsh");
         assert_eq!(pane.window, "@7");
         assert!(pane.active);
         assert!(!pane.zoomed);
-        assert_eq!(pane.role.as_deref(), Some("agent"));
+        assert_eq!(pane.tag.as_deref(), Some("agent"));
         assert_eq!(pane.home.as_deref(), Some("@7"));
         assert_eq!(pane.state.as_deref(), Some("blocked"));
     }
 
     #[test]
-    fn parse_pane_info_treats_empty_role_and_home_as_none() {
-        let pane = parse_pane_info("%1\t42\t/tmp/work\tmain\t@7\t0\t1\t\t\t").unwrap();
+    fn parse_pane_info_treats_empty_tag_and_home_as_none() {
+        let pane = parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t0\t1\t\t\t").unwrap();
         assert!(!pane.active);
         assert!(pane.zoomed);
-        assert_eq!(pane.role, None);
+        assert_eq!(pane.tag, None);
         assert_eq!(pane.home, None);
         assert_eq!(pane.state, None);
     }
@@ -530,6 +550,7 @@ mod tests {
             "%1",
             &SplitOptions {
                 direction: SplitDirection::Horizontal,
+                before: false,
                 size: Some("30%".to_string()),
                 cwd: Some("/tmp/work".to_string()),
                 command: Some("nvim".to_string()),

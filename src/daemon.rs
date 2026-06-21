@@ -169,7 +169,13 @@ impl Daemon {
     }
 
     fn reload_plugins(&mut self) -> Result<()> {
-        let rt = LuaRuntime::new(Rc::clone(&self.panes))?;
+        let rt = match LuaRuntime::new(Rc::clone(&self.panes)) {
+            Ok(rt) => rt,
+            Err(error) => {
+                self.load_errors = vec![format!("prelude.lua: {error}")];
+                return Err(error);
+            }
+        };
         let mut errors = Vec::new();
 
         for path in user_plugin_files() {
@@ -237,36 +243,35 @@ impl Daemon {
                 .process_provider
                 .proc_tree(pane.pid)
                 .unwrap_or_default();
-            if let Some(detection) = self.lua.detect(&pane, proc_tree)? {
+            if let Some(detection) = self.lua.detect(&pane, proc_tree.clone())? {
                 tmux::set_pane_var(&pane.id, "@castr_kind", &detection.kind)?;
                 tmux::set_pane_var(&pane.id, "@castr_label", &detection.label)?;
                 if let Some(color) = &detection.color {
                     tmux::set_pane_var(&pane.id, "@castr_color", color)?;
                 }
-                let state = if detection.agent {
-                    detection
-                        .raw_state
-                        .as_deref()
-                        .map(|raw| self.update_state(&pane.id, raw, pane.active))
-                        .transpose()?
-                        .flatten()
-                        .or(pane.state.clone())
-                } else {
-                    pane.state.clone()
-                };
+                let state = detection
+                    .raw_state
+                    .as_deref()
+                    .map(|raw| self.update_state(&pane.id, raw, pane.active))
+                    .transpose()?
+                    .flatten()
+                    .or(pane.state.clone());
                 snapshots.push(PaneSnapshot {
                     id: pane.id.clone(),
                     pid: pane.pid,
                     kind: detection.kind,
                     label: detection.label,
                     cwd: pane.cwd.clone(),
+                    cwd_basename: basename(&pane.cwd),
+                    command: pane.command.clone(),
                     session: pane.session.clone(),
                     window: pane.window.clone(),
                     active: pane.active,
                     zoomed: pane.zoomed,
-                    role: pane.role.clone(),
+                    tag: pane.tag.clone(),
                     home: pane.home.clone(),
                     state,
+                    processes: proc_tree,
                 });
             }
         }
@@ -444,7 +449,7 @@ impl Daemon {
         let agents = panes
             .iter()
             .filter(|pane| {
-                pane.role.as_deref() == Some("agent")
+                pane.tag.as_deref() == Some("agent")
                     || matches!(pane.kind.as_str(), "pi" | "claude" | "copilot")
             })
             .count();
@@ -457,12 +462,12 @@ impl Daemon {
             .filter(|pane| pane.session.starts_with("__pi-hidden-"))
         {
             let expected_home = pane.session.trim_start_matches("__pi-hidden-");
-            let role = pane.role.clone().unwrap_or_else(|| pane.kind.clone());
+            let tag = pane.tag.clone().unwrap_or_else(|| pane.kind.clone());
             let home = pane.home.clone().unwrap_or_default();
             if home != expected_home {
                 issues.push(format!(
-                    "wrong home: {} role={} home={} session={}",
-                    pane.id, role, home, pane.session
+                    "wrong home: {} tag={} home={} session={}",
+                    pane.id, tag, home, pane.session
                 ));
                 if clean && tmux::kill_pane(&pane.id).is_ok() {
                     cleaned.push(pane.id.clone());
@@ -470,11 +475,11 @@ impl Daemon {
                 continue;
             }
 
-            let key = (pane.session.clone(), role.clone(), home.clone());
+            let key = (pane.session.clone(), tag.clone(), home.clone());
             if let Some(first) = seen.insert(key, pane.id.clone()) {
                 issues.push(format!(
-                    "duplicate hidden pane: {} duplicates {} role={} home={}",
-                    pane.id, first, role, home
+                    "duplicate hidden pane: {} duplicates {} tag={} home={}",
+                    pane.id, first, tag, home
                 ));
                 if clean && tmux::kill_pane(&pane.id).is_ok() {
                     cleaned.push(pane.id.clone());
@@ -530,6 +535,15 @@ fn should_exit_after_liveness_failure(failures: usize) -> bool {
     failures >= MAX_TMUX_LIVENESS_FAILURES
 }
 
+fn basename(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
 fn mark_record_seen(record: &mut StateRecord) {
     record.raw = "idle".to_string();
     record.value = "idle_seen".to_string();
@@ -559,7 +573,7 @@ fn status_strip(panes: &[PaneSnapshot]) -> String {
     panes
         .iter()
         .filter(|pane| {
-            pane.role.as_deref() == Some("agent")
+            pane.tag.as_deref() == Some("agent")
                 || matches!(pane.kind.as_str(), "pi" | "claude" | "copilot")
         })
         .map(|pane| format!("{} {}", status_dot(pane.state.as_deref()), pane.label))
@@ -635,13 +649,16 @@ mod tests {
             kind: "term".to_string(),
             label: "term".to_string(),
             cwd: "/tmp".to_string(),
+            cwd_basename: "tmp".to_string(),
+            command: "zsh".to_string(),
             session: "s".to_string(),
             window: window.to_string(),
             active,
             zoomed: false,
-            role: None,
+            tag: None,
             home: None,
             state: None,
+            processes: Vec::new(),
         }
     }
 
@@ -744,7 +761,7 @@ mod tests {
         assert_eq!(status_dot(Some("blocked")), "#[fg=red]●#[default]");
         assert!(status_strip(&[pane("%1", true)]).is_empty());
         let mut agent = pane("%2", false);
-        agent.role = Some("agent".to_string());
+        agent.tag = Some("agent".to_string());
         agent.label = "pi".to_string();
         agent.state = Some("idle_seen".to_string());
         assert_eq!(status_strip(&[agent]), "#[fg=green]●#[default] pi");
