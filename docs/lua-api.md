@@ -4,88 +4,136 @@ Castr loads every `*.lua` file under `~/.config/castr`.
 
 ## Kinds
 
+A kind tells castr how to recognize what is running in a pane.
+
+Most kinds only need a process name:
+
 ```lua
 castr.kind { name = "psql", match = "psql" }
 ```
 
-`match` checks argv tokens in the pane process tree. It is exact: `pi` matches
-`pi` or `/usr/bin/pi`, not `pip` or `compile`.
+This labels a pane as `psql` when any process in that pane is running `psql`.
+The match is exact: `pi` matches `pi` or `/usr/bin/pi`, but not `pip` or
+`compile`.
 
-Use `detect` when matching needs code:
+Use `detect` when process name is not enough:
 
 ```lua
 castr.kind {
   name = "server",
-  detect = function(p)
-    return p:running("node") and p.cwd_basename == "api"
+  detect = function(pane)
+    return pane:running("node") and pane.cwd:match("/server$") ~= nil
   end,
 }
 ```
 
-Add `state` when a kind should be polled:
+`pane:running("node")` checks the pane's process tree for a `node` process.
+`pane.cwd` is the pane's current directory.
+
+You can change the shown label:
+
+```lua
+castr.kind {
+  name = "nvim",
+  match = "nvim",
+  label = function(pane)
+    return "nvim · " .. pane.cwd_basename
+  end,
+}
+```
+
+`cwd_basename` is the last part of `cwd`. For `/home/me/project`, it is
+`project`.
+
+## State
+
+A kind can report state. Castr uses it for border/status/control indicators.
 
 ```lua
 castr.kind {
   name = "worker",
   match = "worker",
-  state = function(p)
-    if p:var("@castr_push_state") == "blocked" then return "blocked" end
-    if p:capture():match("Working") then return "working" end
+  state = function(pane)
+    if pane:var("@castr_push_state") == "blocked" then return "blocked" end
+    if pane:capture():match("Running") then return "working" end
     return "idle"
   end,
 }
 ```
 
-States: `blocked`, `working`, `done_unseen`, `idle_seen`.
+State values:
 
-## Panes
-
-Pane fields:
-
-```lua
-p.id
-p.pid
-p.cwd
-p.cwd_basename
-p.command
-p.session
-p.window
-p.active
-p.zoomed
-p.kind      -- detected thing running in the pane
-p.label     -- rendered text
-p.tag       -- user marker for finding panes later
-p.home
-p.state
+```text
+blocked
+working
+done_unseen
+idle_seen
 ```
 
-Pane methods:
+## Pane objects
+
+Kind callbacks, key handlers, events, and `castr.panes()` use pane objects.
+
+Fields:
 
 ```lua
-p:running("psql")
-p:var("@tmux_var")
-p:set { tag = "logs", home = p.window, label = "logs" }
-p:capture()
-p:proc_tree():list()
-p:proc_tree():any(function(proc) return proc.argv:match("--debug") end)
+pane.id            -- tmux pane id, like %3
+pane.pid           -- root process pid
+pane.cwd           -- current directory
+pane.cwd_basename  -- last path component of cwd
+pane.command       -- tmux pane_current_command
+pane.session       -- tmux session name
+pane.window        -- tmux window id, like @2
+pane.active        -- true if focused
+pane.zoomed        -- true if the window is zoomed
+pane.kind          -- detected kind
+pane.label         -- shown label
+pane.tag           -- user tag set by castr
+pane.home          -- user home window for stashed panes
+pane.state         -- current state, if any
+```
+
+Methods:
+
+```lua
+pane:running("psql")
+pane:var("@tmux_var")
+pane:set { tag = "logs", label = "logs" }
+pane:capture()
+```
+
+For uncommon process matching, inspect the process tree:
+
+```lua
+pane:proc_tree():any(function(proc)
+  return proc.argv:match("--watch") ~= nil
+end)
 ```
 
 ## Find panes
 
 ```lua
-local pane = castr.find{ tag = "logs", window = current.window }
-local agents = castr.find_all{ tag = "agent" }
+local pane = castr.find { tag = "logs", window = current.window }
+local agents = castr.find_all { tag = "agent" }
 ```
 
-Query fields are pane fields. All fields in the query must match.
+All fields in the query must match.
 
-## Companion panes
+## Reusable panes
 
-Persistent side/bottom panes are one data table plus `toggle` / `expand`:
+Register a pane you want to show/hide later:
 
 ```lua
-castr.register_pane("logs", { dir = "below", size = "25%", command = "zsh" })
+castr.register_pane("logs", {
+  dir = "below",
+  size = "25%",
+  command = "zsh",
+})
+```
 
+Bind keys to it:
+
+```lua
 castr.bind_key("root", "M-e", function(pane)
   castr.toggle(pane, "logs")
 end)
@@ -95,52 +143,70 @@ castr.bind_key("root", "M-E", function(pane)
 end)
 ```
 
-`castr.register_pane(name, opts)` defines a reusable pane config. It does not
-touch tmux or create/select a pane. The default `tag` and stash `name` are the
-same as `name` unless set in `opts`.
+`toggle` shows or hides it. Hidden panes are stashed, so the process keeps
+running. `expand` shows it and expands it.
 
-`toggle` shows/hides the pane. Hidden panes are stashed so their process keeps
-running. `expand` shows the pane and makes it the expanded tmux pane.
-
-`dir`: `below`, `above`, `right`, `left`.
-
-Low-level `castr.split(pane, opts)` still exists and returns a pane handle.
-
-## Commands
+Options:
 
 ```lua
-castr.command("hello", function(args)
-  return "hi"
+tag = "logs"              -- defaults to the registered name
+name = "logs"             -- stash name, defaults to the registered name
+dir = "below"             -- below | above | right | left
+size = "25%"
+command = "zsh"
+title = "logs"
+label = "logs"
+blocked_message = "..."   -- shown instead of hiding a blocked pane
+```
+
+## Split directly
+
+Use this when you do not need a registered pane:
+
+```lua
+local logs = castr.split(pane, {
+  dir = "below",
+  size = "25%",
+  command = "zsh",
+  tag = "logs",
+})
+```
+
+It returns a pane handle.
+
+## Key bindings
+
+```lua
+castr.bind_key("a", function(pane)
+  castr.toggle(pane, "logs")
 end)
 ```
 
-Table form also works:
+The function receives the pane that invoked the binding.
+
+Bind to a command instead:
 
 ```lua
-castr.command { name = "hello", handler = function(args) return "hi" end }
+castr.bind_key("a", { "hello" })
+castr.bind_key("Space", { "control" }, { popup = true })
+```
+
+Options: `popup`, `context`.
+
+## Commands
+
+Use commands when you want a CLI verb:
+
+```lua
+castr.command("hello", function(args)
+  return "hi " .. (args[1] or "")
+end)
 ```
 
 Then:
 
 ```sh
-castr hello
-```
-
-## Key bindings
-
-```lua
-local logs = { tag = "logs", dir = "below", size = "25%", command = "zsh" }
-
-castr.bind_key("root", "M-e", function(pane)
-  castr.toggle(pane, logs)
-end)
-```
-
-You can still bind to commands:
-
-```lua
-castr.bind_key("a", { "hello" })
-castr.bind_key("Space", { "control" }, { popup = true })
+castr hello there
 ```
 
 ## Panels
@@ -167,21 +233,18 @@ castr.on("window:close", function(window_id) end)
 castr.on("state:change", function(pane_id) end)
 ```
 
-`pane` is the pane that invoked the binding. Extra raw CLI args are passed as a
-second argument.
-
 ## Low-level tmux helpers
 
-Use these when the high-level helpers are not enough:
+Use these when the helpers above are not enough:
 
 ```lua
-castr.tmux.split { target = pane_id, direction = "h", size = "35%", cwd = p.cwd, command = "zsh" }
-castr.tmux.unstash { pane = pane_id, target = target_id, horizontal = true, size = "35%" }
-castr.tmux.stash { pane = pane_id, window = window_id, cwd = p.cwd, name = "hidden" }
-castr.tmux.unzoom(window_id)
-castr.tmux.select(pane_id)
-castr.tmux.zoom(pane_id) -- tmux resize-pane -Z
-castr.tmux.display { target = pane_id, message = "message" }
+castr.tmux.split { target = pane.id, dir = "below", size = "25%", cwd = pane.cwd }
+castr.tmux.stash { pane = pane.id, window = pane.window, cwd = pane.cwd, name = "hidden" }
+castr.tmux.unstash { pane = hidden.id, target = pane.id, horizontal = true, size = "35%" }
+castr.tmux.unzoom(pane.window)
+castr.tmux.select(pane.id)
+castr.tmux.zoom(pane.id) -- tmux resize-pane -Z
+castr.tmux.display { target = pane.id, message = "message" }
 ```
 
 ## Compatibility aliases

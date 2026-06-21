@@ -13,6 +13,7 @@ pub struct PaneInfo {
     pub active: bool,
     pub zoomed: bool,
     pub tag: Option<String>,
+    pub migrate_tag: bool,
     pub home: Option<String>,
     pub state: Option<String>,
 }
@@ -72,7 +73,7 @@ pub fn list_panes() -> Result<Vec<PaneInfo>> {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{session_name}\t#{window_id}\t#{pane_active}\t#{window_zoomed_flag}\t#{@castr_tag}\t#{@castr_home}\t#{@castr_state}",
+        "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{session_name}\t#{window_id}\t#{pane_active}\t#{window_zoomed_flag}\t#{@castr_tag}\t#{@castr_role}\t#{@castr_home}\t#{@castr_state}",
     ])?;
 
     output
@@ -83,7 +84,7 @@ pub fn list_panes() -> Result<Vec<PaneInfo>> {
 }
 
 fn parse_pane_info(line: &str) -> Result<PaneInfo> {
-    let mut parts = line.splitn(12, '\t');
+    let mut parts = line.splitn(13, '\t');
     let id = parts
         .next()
         .ok_or_else(|| anyhow!("missing pane id in tmux output"))?
@@ -99,7 +100,10 @@ fn parse_pane_info(line: &str) -> Result<PaneInfo> {
     let window = parts.next().unwrap_or_default().to_string();
     let active = parts.next() == Some("1");
     let zoomed = parts.next() == Some("1");
-    let tag = nonempty(parts.next().unwrap_or_default());
+    let raw_tag = nonempty(parts.next().unwrap_or_default());
+    let old_role = nonempty(parts.next().unwrap_or_default());
+    let migrate_tag = raw_tag.is_none() && old_role.is_some();
+    let tag = raw_tag.or(old_role);
     let home = nonempty(parts.next().unwrap_or_default());
     let state = nonempty(parts.next().unwrap_or_default());
     Ok(PaneInfo {
@@ -112,6 +116,7 @@ fn parse_pane_info(line: &str) -> Result<PaneInfo> {
         active,
         zoomed,
         tag,
+        migrate_tag,
         home,
         state,
     })
@@ -441,6 +446,10 @@ pub fn display_message(target: &str, message: &str) -> Result<()> {
     tmux(&["display-message", "-t", target, message]).map(|_| ())
 }
 
+pub fn display_global_message(message: &str) -> Result<()> {
+    tmux(&["display-message", message]).map(|_| ())
+}
+
 pub fn capture(pane: &str) -> Result<String> {
     tmux(&["capture-pane", "-p", "-t", pane])
 }
@@ -483,8 +492,8 @@ mod tests {
 
     #[test]
     fn parse_pane_info_reads_window_id_tag_and_home() {
-        let pane =
-            parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t1\t0\tagent\t@7\tblocked").unwrap();
+        let pane = parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t1\t0\tagent\t\t@7\tblocked")
+            .unwrap();
         assert_eq!(pane.id, "%1");
         assert_eq!(pane.pid, 42);
         assert_eq!(pane.command, "zsh");
@@ -492,18 +501,29 @@ mod tests {
         assert!(pane.active);
         assert!(!pane.zoomed);
         assert_eq!(pane.tag.as_deref(), Some("agent"));
+        assert!(!pane.migrate_tag);
         assert_eq!(pane.home.as_deref(), Some("@7"));
         assert_eq!(pane.state.as_deref(), Some("blocked"));
     }
 
     #[test]
     fn parse_pane_info_treats_empty_tag_and_home_as_none() {
-        let pane = parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t0\t1\t\t\t").unwrap();
+        let pane = parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t0\t1\t\t\t\t").unwrap();
         assert!(!pane.active);
         assert!(pane.zoomed);
         assert_eq!(pane.tag, None);
+        assert!(!pane.migrate_tag);
         assert_eq!(pane.home, None);
         assert_eq!(pane.state, None);
+    }
+
+    #[test]
+    fn parse_pane_info_migrates_old_role_to_tag() {
+        let pane =
+            parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t0\t0\t\tagent\t@7\t").unwrap();
+        assert_eq!(pane.tag.as_deref(), Some("agent"));
+        assert!(pane.migrate_tag);
+        assert_eq!(pane.home.as_deref(), Some("@7"));
     }
 
     #[test]

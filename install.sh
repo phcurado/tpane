@@ -39,6 +39,21 @@ url="https://github.com/$REPO/releases/download/$tag/$asset"
 
 echo "downloading $url"
 curl -fsSL "$url" -o "$TMP/$asset"
+curl -fsSL "https://github.com/$REPO/releases/download/$tag/checksums.txt" -o "$TMP/checksums.txt"
+expected=$(grep "  $asset\$" "$TMP/checksums.txt" | awk '{print $1}')
+if [ -z "$expected" ]; then
+  echo "checksum not found for $asset" >&2
+  exit 1
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  actual=$(sha256sum "$TMP/$asset" | awk '{print $1}')
+else
+  actual=$(shasum -a 256 "$TMP/$asset" | awk '{print $1}')
+fi
+if [ "$actual" != "$expected" ]; then
+  echo "checksum mismatch for $asset" >&2
+  exit 1
+fi
 tar -xzf "$TMP/$asset" -C "$TMP"
 
 mkdir -p "$BIN_DIR"

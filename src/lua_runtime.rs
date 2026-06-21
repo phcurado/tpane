@@ -574,6 +574,20 @@ fn parse_bind_command_value(
 fn parse_keybind_opts(value: &Value, default_context: bool) -> mlua::Result<(bool, bool)> {
     match value {
         Value::Table(table) => {
+            for key in table
+                .clone()
+                .pairs::<String, Value>()
+                .map(|pair| pair.map(|(key, _)| key))
+            {
+                match key?.as_str() {
+                    "popup" | "context" => {}
+                    other => {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "unknown bind_key option: {other}"
+                        )));
+                    }
+                }
+            }
             let popup = table.get::<Option<bool>>("popup")?.unwrap_or(false);
             let context = table.get::<Option<bool>>("context")?.unwrap_or(if popup {
                 false
@@ -1168,7 +1182,7 @@ local function companion_query(from, opts)
 end
 
 local function companion_horizontal(opts)
-  return opts.horizontal ~= nil and opts.horizontal or opts.dir == "right" or opts.dir == "left" or opts.dir == "h" or opts.dir == "horizontal"
+  return opts.dir == "right" or opts.dir == "left" or opts.dir == "h" or opts.dir == "horizontal"
 end
 
 local function show_companion(from, opts)
@@ -1449,7 +1463,7 @@ mod tests {
                 "test.lua",
                 r#"
                 castr.bind_key("a", { "pi" })
-                castr.bind_key("A", { "pi", "expand" }, { desc = "workspace" })
+                castr.bind_key("A", { "pi", "expand" })
                 castr.bind_key("root", "M-a", "pi expand")
                 "#,
             )
@@ -1582,6 +1596,19 @@ mod tests {
                 .as_deref(),
             Some("ok")
         );
+    }
+
+    #[test]
+    fn bind_key_rejects_unknown_options() {
+        let (runtime, _) = runtime();
+        let error = runtime
+            .load_source(
+                "test.lua",
+                r#"castr.bind_key("a", { "pi" }, { desc = "unused" })"#,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown bind_key option: desc"));
     }
 
     #[test]
@@ -1727,6 +1754,7 @@ mod tests {
                     active: true,
                     zoomed: false,
                     tag: None,
+                    migrate_tag: false,
                     home: None,
                     state: None,
                 },
@@ -1961,6 +1989,7 @@ mod tests {
                     active: true,
                     zoomed: false,
                     tag: None,
+                    migrate_tag: false,
                     home: None,
                     state: None,
                 },

@@ -173,6 +173,7 @@ impl Daemon {
             Ok(rt) => rt,
             Err(error) => {
                 self.load_errors = vec![format!("prelude.lua: {error}")];
+                self.surface_load_errors();
                 return Err(error);
             }
         };
@@ -207,6 +208,7 @@ impl Daemon {
 
         if let Err(error) = rt.load_builtins() {
             self.load_errors = vec![format!("builtin-kinds.lua: {error}")];
+            self.surface_load_errors();
             return Err(error);
         }
 
@@ -224,6 +226,9 @@ impl Daemon {
         self.lua = rt;
         self.load_errors = errors;
         self.runtime_errors.clear();
+        if !self.load_errors.is_empty() {
+            self.surface_load_errors();
+        }
         self.config_sig = config_signature();
         Ok(())
     }
@@ -248,6 +253,11 @@ impl Daemon {
                 tmux::set_pane_var(&pane.id, "@castr_label", &detection.label)?;
                 if let Some(color) = &detection.color {
                     tmux::set_pane_var(&pane.id, "@castr_color", color)?;
+                }
+                if pane.migrate_tag {
+                    if let Some(tag) = &pane.tag {
+                        tmux::set_pane_var(&pane.id, "@castr_tag", tag)?;
+                    }
                 }
                 let state = detection
                     .raw_state
@@ -276,7 +286,7 @@ impl Daemon {
             }
         }
 
-        let status = status_strip(&snapshots);
+        let status = status_strip(&snapshots, !self.status_errors().is_empty());
         if status != self.status_strip {
             tmux::set_global_var("@castr_status", &status)?;
             self.status_strip = status;
@@ -327,6 +337,26 @@ impl Daemon {
         self.prev_pane_ids = current_ids;
         self.prev_windows = current_windows;
         self.prev_active = active;
+    }
+
+    fn surface_load_errors(&self) {
+        if self.load_errors.is_empty() {
+            return;
+        }
+        let first = self
+            .load_errors
+            .first()
+            .map(|error| error.lines().next().unwrap_or(error))
+            .unwrap_or("Lua load error");
+        let message = if self.load_errors.len() == 1 {
+            format!("castr: {first}")
+        } else {
+            format!(
+                "castr: {} load errors; run castr status",
+                self.load_errors.len()
+            )
+        };
+        let _ = tmux::display_global_message(&message);
     }
 
     fn status_errors(&self) -> Vec<String> {
@@ -569,16 +599,21 @@ fn state_value(raw: &str, active: bool, previous: Option<&StateRecord>) -> Strin
     }
 }
 
-fn status_strip(panes: &[PaneSnapshot]) -> String {
-    panes
-        .iter()
-        .filter(|pane| {
-            pane.tag.as_deref() == Some("agent")
-                || matches!(pane.kind.as_str(), "pi" | "claude" | "copilot")
-        })
-        .map(|pane| format!("{} {}", status_dot(pane.state.as_deref()), pane.label))
-        .collect::<Vec<_>>()
-        .join("  ")
+fn status_strip(panes: &[PaneSnapshot], has_errors: bool) -> String {
+    let mut parts = Vec::new();
+    if has_errors {
+        parts.push("#[fg=red]castr error#[default]".to_string());
+    }
+    parts.extend(
+        panes
+            .iter()
+            .filter(|pane| {
+                pane.tag.as_deref() == Some("agent")
+                    || matches!(pane.kind.as_str(), "pi" | "claude" | "copilot")
+            })
+            .map(|pane| format!("{} {}", status_dot(pane.state.as_deref()), pane.label)),
+    );
+    parts.join("  ")
 }
 
 fn status_dot(state: Option<&str>) -> &'static str {
@@ -759,12 +794,13 @@ mod tests {
     #[test]
     fn status_strip_shows_agent_states() {
         assert_eq!(status_dot(Some("blocked")), "#[fg=red]●#[default]");
-        assert!(status_strip(&[pane("%1", true)]).is_empty());
+        assert!(status_strip(&[pane("%1", true)], false).is_empty());
         let mut agent = pane("%2", false);
         agent.tag = Some("agent".to_string());
         agent.label = "pi".to_string();
         agent.state = Some("idle_seen".to_string());
-        assert_eq!(status_strip(&[agent]), "#[fg=green]●#[default] pi");
+        assert_eq!(status_strip(&[agent], false), "#[fg=green]●#[default] pi");
+        assert_eq!(status_strip(&[], true), "#[fg=red]castr error#[default]");
     }
 
     #[test]
