@@ -12,10 +12,17 @@ use anyhow::{Context, Result};
 
 use crate::lua_runtime::{LuaRuntime, user_plugin_files};
 use crate::process::{ProcessProvider, SystemProcessProvider};
-use crate::protocol::{DAEMON_SIGNATURE, PaneSnapshot, Request, Response};
+use crate::protocol::{PaneSnapshot, Request, Response};
 use crate::tmux;
 
 const MAX_RUNTIME_ERRORS: usize = 50;
+const MAX_TMUX_LIVENESS_FAILURES: usize = 5;
+
+#[derive(Debug, Clone)]
+struct StateRecord {
+    raw: String,
+    value: String,
+}
 
 pub fn run(socket: PathBuf) -> Result<()> {
     if socket.exists() {
@@ -33,6 +40,7 @@ pub fn run(socket: PathBuf) -> Result<()> {
     let mut daemon = Daemon::new()?;
     let started = Instant::now();
     let mut last_scan = Instant::now();
+    let mut tmux_liveness_failures = 0usize;
 
     loop {
         accept_ready(&listener, &mut daemon)?;
@@ -47,8 +55,15 @@ pub fn run(socket: PathBuf) -> Result<()> {
             last_scan = Instant::now();
         }
 
-        if started.elapsed() > Duration::from_secs(5) && !tmux::server_alive() {
-            break;
+        if started.elapsed() > Duration::from_secs(5) {
+            if tmux::server_alive() {
+                tmux_liveness_failures = 0;
+            } else {
+                tmux_liveness_failures += 1;
+                if tmux_liveness_failures >= MAX_TMUX_LIVENESS_FAILURES {
+                    break;
+                }
+            }
         }
 
         thread::sleep(Duration::from_millis(100));
@@ -63,10 +78,13 @@ struct Daemon {
     process_provider: SystemProcessProvider,
     panes: Rc<RefCell<Vec<PaneSnapshot>>>,
     prev_pane_ids: HashSet<String>,
+    prev_windows: HashSet<String>,
     prev_active: Option<String>,
     last_good: HashMap<PathBuf, String>,
     load_errors: Vec<String>,
     runtime_errors: Vec<String>,
+    states: HashMap<String, StateRecord>,
+    status_strip: String,
     config_sig: Vec<(PathBuf, SystemTime)>,
 }
 
@@ -78,10 +96,13 @@ impl Daemon {
             process_provider: SystemProcessProvider,
             panes,
             prev_pane_ids: HashSet::new(),
+            prev_windows: HashSet::new(),
             prev_active: None,
             last_good: HashMap::new(),
             load_errors: Vec::new(),
             runtime_errors: Vec::new(),
+            states: HashMap::new(),
+            status_strip: String::new(),
             config_sig: config_signature(),
         };
         daemon.reload_plugins()?;
@@ -90,7 +111,7 @@ impl Daemon {
 
     fn handle(&mut self, request: Request) -> Response {
         match request {
-            Request::Ping => Response::ok(Some(DAEMON_SIGNATURE.to_string())),
+            Request::Ping => Response::ok(Some("ok".to_string())),
             Request::Refresh => match self.reload_plugins().and_then(|()| self.scan()) {
                 Ok(count) => Response::ok(Some(format!("refreshed {count} panes"))),
                 Err(error) => Response::error(error),
@@ -115,17 +136,35 @@ impl Daemon {
                 Ok(data) => Response::ok(Some(data)),
                 Err(error) => Response::error(error),
             },
+            Request::Panels => match self.panels_data() {
+                Ok(data) => Response::ok(Some(data)),
+                Err(error) => Response::error(error),
+            },
             Request::SelectPane { id } => match self.select_pane(&id) {
                 Ok(()) => Response::ok(Some("selected".to_string())),
                 Err(error) => Response::error(error),
             },
-            Request::Command { name, args } => match self.lua.run_command(&name, &args) {
-                Ok(data) => Response::ok(data),
-                Err(error) => {
-                    self.record_runtime_error(format!("command {name}: {error}"));
-                    Response::error(error)
-                }
+            Request::ExpandPane { id } => match self.expand_pane(&id) {
+                Ok(()) => Response::ok(Some("expanded".to_string())),
+                Err(error) => Response::error(error),
             },
+            Request::SetState { id, state } => match self.set_state(&id, &state) {
+                Ok(()) => Response::ok(Some("set".to_string())),
+                Err(error) => Response::error(error),
+            },
+            Request::Doctor { clean } => match self.doctor(clean) {
+                Ok(report) => Response::ok(Some(report)),
+                Err(error) => Response::error(error),
+            },
+            Request::Command { name, args } => {
+                match self.scan().and_then(|_| self.lua.run_command(&name, &args)) {
+                    Ok(data) => Response::ok(data),
+                    Err(error) => {
+                        self.record_runtime_error(format!("command {name}: {error}"));
+                        Response::error(error)
+                    }
+                }
+            }
         }
     }
 
@@ -165,6 +204,17 @@ impl Daemon {
             return Err(error);
         }
 
+        for keybind in rt.keybinds() {
+            if let Err(error) = tmux::bind_key(
+                &keybind.mode,
+                &keybind.key,
+                &keybind_command(&keybind.command, keybind.context),
+                keybind.popup,
+            ) {
+                errors.push(format!("keybind {} {}: {error}", keybind.mode, keybind.key));
+            }
+        }
+
         self.lua = rt;
         self.load_errors = errors;
         self.runtime_errors.clear();
@@ -190,6 +240,20 @@ impl Daemon {
             if let Some(detection) = self.lua.detect(&pane, proc_tree)? {
                 tmux::set_pane_var(&pane.id, "@castr_kind", &detection.kind)?;
                 tmux::set_pane_var(&pane.id, "@castr_label", &detection.label)?;
+                if let Some(color) = &detection.color {
+                    tmux::set_pane_var(&pane.id, "@castr_color", color)?;
+                }
+                let state = if detection.agent {
+                    detection
+                        .raw_state
+                        .as_deref()
+                        .map(|raw| self.update_state(&pane.id, raw, pane.active))
+                        .transpose()?
+                        .flatten()
+                        .or(pane.state.clone())
+                } else {
+                    pane.state.clone()
+                };
                 snapshots.push(PaneSnapshot {
                     id: pane.id.clone(),
                     pid: pane.pid,
@@ -200,10 +264,18 @@ impl Daemon {
                     window: pane.window.clone(),
                     active: pane.active,
                     zoomed: pane.zoomed,
+                    role: pane.role.clone(),
+                    home: pane.home.clone(),
+                    state,
                 });
             }
         }
 
+        let status = status_strip(&snapshots);
+        if status != self.status_strip {
+            tmux::set_global_var("@castr_status", &status)?;
+            self.status_strip = status;
+        }
         self.update_events(&snapshots);
         *self.panes.borrow_mut() = snapshots;
         Ok(count)
@@ -213,6 +285,10 @@ impl Daemon {
         let current_ids = snapshots
             .iter()
             .map(|pane| pane.id.clone())
+            .collect::<HashSet<_>>();
+        let current_windows = snapshots
+            .iter()
+            .map(|pane| pane.window.clone())
             .collect::<HashSet<_>>();
         for pane in snapshots {
             if !self.prev_pane_ids.contains(&pane.id) {
@@ -226,14 +302,25 @@ impl Daemon {
             .map(|pane| pane.id.clone());
         if active != self.prev_active {
             if let Some(active_id) = &active {
+                self.mark_seen(active_id);
                 if let Some(pane) = snapshots.iter().find(|pane| &pane.id == active_id) {
                     self.record_runtime_errors(self.lua.fire_event("pane:focus", Some(pane)));
                 }
             }
         }
 
+        for window in self
+            .prev_windows
+            .difference(&current_windows)
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.record_runtime_errors(self.lua.fire_event_text("window:close", &window));
+        }
+
         self.record_runtime_errors(self.lua.fire_event("tick", None));
         self.prev_pane_ids = current_ids;
+        self.prev_windows = current_windows;
         self.prev_active = active;
     }
 
@@ -261,9 +348,62 @@ impl Daemon {
         }
     }
 
+    fn update_state(&mut self, pane_id: &str, raw: &str, active: bool) -> Result<Option<String>> {
+        let previous = self.states.get(pane_id).cloned();
+        let value = state_value(raw, active, previous.as_ref());
+        let changed = previous.as_ref().map(|record| record.value.as_str()) != Some(value.as_str());
+        self.states.insert(
+            pane_id.to_string(),
+            StateRecord {
+                raw: raw.to_string(),
+                value: value.clone(),
+            },
+        );
+        tmux::set_pane_var(pane_id, "@castr_state", &value)?;
+        if changed {
+            self.record_runtime_errors(self.lua.fire_event_text("state:change", pane_id));
+        }
+        Ok(Some(value))
+    }
+
+    fn mark_seen(&mut self, pane_id: &str) {
+        let Some(record) = self.states.get_mut(pane_id) else {
+            return;
+        };
+        if record.value != "done_unseen" {
+            return;
+        }
+        mark_record_seen(record);
+        let _ = tmux::set_pane_var(pane_id, "@castr_state", "idle_seen");
+        self.record_runtime_errors(self.lua.fire_event_text("state:change", pane_id));
+    }
+
+    fn set_state(&mut self, pane_id: &str, state: &str) -> Result<()> {
+        if state == "idle" || state == "idle_seen" {
+            tmux::unset_pane_var(pane_id, "@castr_push_state")?;
+        } else {
+            tmux::set_pane_var(pane_id, "@castr_push_state", state)?;
+        }
+        let active = self
+            .panes
+            .borrow()
+            .iter()
+            .find(|pane| pane.id == pane_id)
+            .map(|pane| pane.active)
+            .unwrap_or(false);
+        self.update_state(pane_id, state, active)?;
+        self.scan()?;
+        Ok(())
+    }
+
     fn panes_data(&mut self) -> Result<String> {
         self.scan()?;
         Ok(serde_json::to_string(&*self.panes.borrow())?)
+    }
+
+    fn panels_data(&mut self) -> Result<String> {
+        self.scan()?;
+        Ok(serde_json::to_string(&self.lua.render_panels()?)?)
     }
 
     fn select_pane(&mut self, id: &str) -> Result<()> {
@@ -274,6 +414,176 @@ impl Daemon {
             anyhow::bail!("unknown pane {id}")
         }
     }
+
+    fn expand_pane(&mut self, id: &str) -> Result<()> {
+        self.scan()?;
+        if !self.panes.borrow().iter().any(|pane| pane.id == id) {
+            anyhow::bail!("unknown pane {id}");
+        }
+        let window = tmux::window_id(id)?;
+        let active = tmux::active_pane(&window)?;
+        if tmux::is_zoomed(&window)? {
+            if active == id {
+                tmux::zoom(id)?;
+                return Ok(());
+            }
+            tmux::zoom(&active)?;
+        }
+        tmux::select_pane(id)?;
+        tmux::zoom(id)
+    }
+
+    fn doctor(&mut self, clean: bool) -> Result<String> {
+        self.scan()?;
+        let panes = self.panes.borrow().clone();
+        let hidden_sessions = panes
+            .iter()
+            .filter(|pane| pane.session.starts_with("__pi-hidden-"))
+            .map(|pane| pane.session.clone())
+            .collect::<HashSet<_>>();
+        let agents = panes
+            .iter()
+            .filter(|pane| {
+                pane.role.as_deref() == Some("agent")
+                    || matches!(pane.kind.as_str(), "pi" | "claude" | "copilot")
+            })
+            .count();
+        let mut issues = Vec::new();
+        let mut cleaned = Vec::new();
+        let mut seen: HashMap<(String, String, String), String> = HashMap::new();
+
+        for pane in panes
+            .iter()
+            .filter(|pane| pane.session.starts_with("__pi-hidden-"))
+        {
+            let expected_home = pane.session.trim_start_matches("__pi-hidden-");
+            let role = pane.role.clone().unwrap_or_else(|| pane.kind.clone());
+            let home = pane.home.clone().unwrap_or_default();
+            if home != expected_home {
+                issues.push(format!(
+                    "wrong home: {} role={} home={} session={}",
+                    pane.id, role, home, pane.session
+                ));
+                if clean && tmux::kill_pane(&pane.id).is_ok() {
+                    cleaned.push(pane.id.clone());
+                }
+                continue;
+            }
+
+            let key = (pane.session.clone(), role.clone(), home.clone());
+            if let Some(first) = seen.insert(key, pane.id.clone()) {
+                issues.push(format!(
+                    "duplicate hidden pane: {} duplicates {} role={} home={}",
+                    pane.id, first, role, home
+                ));
+                if clean && tmux::kill_pane(&pane.id).is_ok() {
+                    cleaned.push(pane.id.clone());
+                }
+            }
+        }
+
+        let panels = self
+            .lua
+            .render_panels()
+            .map(|panels| panels.len())
+            .unwrap_or(0);
+        let errors = self.status_errors();
+        let mut report = vec![
+            if issues.is_empty() {
+                "ok".to_string()
+            } else {
+                "issues".to_string()
+            },
+            format!("panes: {}", panes.len()),
+            format!("agents: {agents}"),
+            format!("hidden sessions: {}", hidden_sessions.len()),
+            format!("keybinds: {}", self.lua.keybinds().len()),
+            format!("panels: {panels}"),
+            format!(
+                "status: {}",
+                if errors.is_empty() { "ok" } else { "errors" }
+            ),
+        ];
+
+        if !issues.is_empty() {
+            report.push("".to_string());
+            report.push("issues:".to_string());
+            report.extend(issues.iter().map(|issue| format!("  {issue}")));
+        }
+        if clean && !cleaned.is_empty() {
+            report.push("".to_string());
+            report.push("cleaned:".to_string());
+            report.extend(cleaned.iter().map(|pane| format!("  {pane}")));
+        }
+        if !errors.is_empty() {
+            report.push("".to_string());
+            report.push("errors:".to_string());
+            report.extend(errors.iter().map(|error| format!("  {error}")));
+        }
+
+        Ok(report.join("\n"))
+    }
+}
+
+#[cfg(test)]
+fn should_exit_after_liveness_failure(failures: usize) -> bool {
+    failures >= MAX_TMUX_LIVENESS_FAILURES
+}
+
+fn mark_record_seen(record: &mut StateRecord) {
+    record.raw = "idle".to_string();
+    record.value = "idle_seen".to_string();
+}
+
+fn state_value(raw: &str, active: bool, previous: Option<&StateRecord>) -> String {
+    match raw {
+        "blocked" => "blocked".to_string(),
+        "working" => "working".to_string(),
+        "idle" => {
+            if active {
+                "idle_seen".to_string()
+            } else if matches!(
+                previous.map(|record| record.value.as_str()),
+                Some("working" | "done_unseen")
+            ) {
+                "done_unseen".to_string()
+            } else {
+                "idle_seen".to_string()
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
+fn status_strip(panes: &[PaneSnapshot]) -> String {
+    panes
+        .iter()
+        .filter(|pane| {
+            pane.role.as_deref() == Some("agent")
+                || matches!(pane.kind.as_str(), "pi" | "claude" | "copilot")
+        })
+        .map(|pane| format!("{} {}", status_dot(pane.state.as_deref()), pane.label))
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+fn status_dot(state: Option<&str>) -> &'static str {
+    match state {
+        Some("blocked") => "#[fg=red]●#[default]",
+        Some("working") => "#[fg=yellow]●#[default]",
+        Some("done_unseen") => "#[fg=blue]●#[default]",
+        Some("idle_seen") => "#[fg=green]●#[default]",
+        _ => "",
+    }
+}
+
+fn keybind_command(command: &[String], context: bool) -> String {
+    let mut parts = vec!["castr".to_string()];
+    parts.extend(command.iter().cloned());
+    if context {
+        parts.push("#{pane_id}".to_string());
+    }
+    parts.join(" ")
 }
 
 fn config_signature() -> Vec<(PathBuf, SystemTime)> {
@@ -315,6 +625,10 @@ mod tests {
     use super::*;
 
     fn pane(id: &str, active: bool) -> PaneSnapshot {
+        pane_in_window(id, active, "@1")
+    }
+
+    fn pane_in_window(id: &str, active: bool, window: &str) -> PaneSnapshot {
         PaneSnapshot {
             id: id.to_string(),
             pid: 123,
@@ -322,9 +636,12 @@ mod tests {
             label: "term".to_string(),
             cwd: "/tmp".to_string(),
             session: "s".to_string(),
-            window: "1:w".to_string(),
+            window: window.to_string(),
             active,
             zoomed: false,
+            role: None,
+            home: None,
+            state: None,
         }
     }
 
@@ -337,10 +654,13 @@ mod tests {
             process_provider: SystemProcessProvider,
             panes,
             prev_pane_ids: HashSet::new(),
+            prev_windows: HashSet::new(),
             prev_active: None,
             last_good: HashMap::new(),
             load_errors: Vec::new(),
             runtime_errors: Vec::new(),
+            states: HashMap::new(),
+            status_strip: String::new(),
             config_sig: Vec::new(),
         }
     }
@@ -377,6 +697,26 @@ mod tests {
     }
 
     #[test]
+    fn update_events_fires_window_close_with_window_id() {
+        let mut daemon = test_daemon(
+            r#"
+            closed = ""
+            castr.on("window:close", function(window) closed = window end)
+            castr.register_command{
+              name = "closed",
+              handler = function() return closed end,
+            }
+            "#,
+        );
+
+        daemon.update_events(&[pane_in_window("%1", true, "@1")]);
+        daemon.update_events(&[pane_in_window("%2", true, "@2")]);
+
+        let closed = daemon.lua.run_command("closed", &[]).unwrap();
+        assert_eq!(closed.as_deref(), Some("@1"));
+    }
+
+    #[test]
     fn event_errors_are_collected_without_crashing() {
         let mut daemon = test_daemon(
             r#"
@@ -387,6 +727,76 @@ mod tests {
         daemon.update_events(&[]);
         assert_eq!(daemon.runtime_errors.len(), 1);
         assert!(daemon.runtime_errors[0].contains("tick failed"));
+    }
+
+    #[test]
+    fn daemon_exits_only_after_consecutive_liveness_failures() {
+        assert!(!should_exit_after_liveness_failure(
+            MAX_TMUX_LIVENESS_FAILURES - 1
+        ));
+        assert!(should_exit_after_liveness_failure(
+            MAX_TMUX_LIVENESS_FAILURES
+        ));
+    }
+
+    #[test]
+    fn status_strip_shows_agent_states() {
+        assert_eq!(status_dot(Some("blocked")), "#[fg=red]●#[default]");
+        assert!(status_strip(&[pane("%1", true)]).is_empty());
+        let mut agent = pane("%2", false);
+        agent.role = Some("agent".to_string());
+        agent.label = "pi".to_string();
+        agent.state = Some("idle_seen".to_string());
+        assert_eq!(status_strip(&[agent]), "#[fg=green]●#[default] pi");
+    }
+
+    #[test]
+    fn keybind_command_injects_invoking_pane_context() {
+        assert_eq!(
+            keybind_command(&["pi".to_string(), "expand".to_string()], true),
+            "castr pi expand #{pane_id}"
+        );
+        assert_eq!(
+            keybind_command(&["control".to_string()], false),
+            "castr control"
+        );
+    }
+
+    #[test]
+    fn state_value_marks_finished_unseen_until_focus() {
+        assert_eq!(state_value("working", false, None), "working");
+        assert_eq!(
+            state_value(
+                "idle",
+                false,
+                Some(&StateRecord {
+                    raw: "working".to_string(),
+                    value: "working".to_string(),
+                })
+            ),
+            "done_unseen"
+        );
+        assert_eq!(
+            state_value(
+                "idle",
+                true,
+                Some(&StateRecord {
+                    raw: "working".to_string(),
+                    value: "working".to_string(),
+                })
+            ),
+            "idle_seen"
+        );
+    }
+
+    #[test]
+    fn mark_record_seen_sets_idle_seen() {
+        let mut record = StateRecord {
+            raw: "idle".to_string(),
+            value: "done_unseen".to_string(),
+        };
+        mark_record_seen(&mut record);
+        assert_eq!(record.value, "idle_seen");
     }
 
     #[test]

@@ -103,7 +103,73 @@ fn decode_cmdline(bytes: &[u8]) -> String {
         .join(" ")
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn proc_tree(root_pid: i32) -> Result<Vec<ProcessInfo>> {
+    let output = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,command="])
+        .output()
+        .context("failed to run ps")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "ps failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let processes = parse_ps_processes(&String::from_utf8_lossy(&output.stdout));
+    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+    for process in processes.values() {
+        children.entry(process.ppid).or_default().push(process.pid);
+    }
+
+    let mut tree = Vec::new();
+    let mut stack = vec![root_pid];
+    while let Some(pid) = stack.pop() {
+        if let Some(process) = processes.get(&pid) {
+            tree.push(process.clone());
+            if let Some(child_pids) = children.get(&pid) {
+                stack.extend(child_pids.iter().copied());
+            }
+        }
+    }
+    Ok(tree)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_ps_processes(output: &str) -> HashMap<i32, ProcessInfo> {
+    let mut processes = HashMap::new();
+    for line in output.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(pid) = parts.next().and_then(|part| part.parse::<i32>().ok()) else {
+            continue;
+        };
+        let Some(ppid) = parts.next().and_then(|part| part.parse::<i32>().ok()) else {
+            continue;
+        };
+        let argv = parts.collect::<Vec<_>>().join(" ");
+        processes.insert(pid, ProcessInfo { pid, ppid, argv });
+    }
+    processes
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn proc_tree(_root_pid: i32) -> Result<Vec<ProcessInfo>> {
-    anyhow::bail!("ProcessProvider is only implemented for Linux in this slice")
+    anyhow::bail!("ProcessProvider is only implemented for Linux/macOS in this slice")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ps_processes_handles_commands_with_spaces() {
+        let processes = parse_ps_processes(
+            "  10   1 /bin/zsh -l\n  11  10 pi --project /tmp/castr\n garbage\n",
+        );
+        assert_eq!(processes.get(&10).unwrap().ppid, 1);
+        assert_eq!(processes.get(&10).unwrap().argv, "/bin/zsh -l");
+        assert_eq!(processes.get(&11).unwrap().ppid, 10);
+        assert_eq!(processes.get(&11).unwrap().argv, "pi --project /tmp/castr");
+        assert!(!processes.contains_key(&0));
+    }
 }
