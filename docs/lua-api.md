@@ -1,15 +1,15 @@
 # Lua API
 
-Castr loads every `*.lua` file under `~/.config/castr`.
+tpane loads every `*.lua` file under `~/.config/tpane`.
 
 ## Kinds
 
-A kind tells castr how to recognize what is running in a pane.
+A kind tells tpane how to recognize what is running in a pane.
 
 Most kinds only need a process name:
 
 ```lua
-castr.kind { name = "psql", match = "psql" }
+tpane.kind { name = "psql", match = "psql" }
 ```
 
 This labels a pane as `psql` when any process in that pane is running `psql`.
@@ -19,7 +19,7 @@ The match is exact: `pi` matches `pi` or `/usr/bin/pi`, but not `pip` or
 Use `detect` when process name is not enough:
 
 ```lua
-castr.kind {
+tpane.kind {
   name = "server",
   detect = function(pane)
     return pane:running("node") and pane.cwd:match("/server$") ~= nil
@@ -33,7 +33,7 @@ castr.kind {
 You can change the shown label:
 
 ```lua
-castr.kind {
+tpane.kind {
   name = "nvim",
   match = "nvim",
   label = function(pane)
@@ -47,14 +47,14 @@ castr.kind {
 
 ## State
 
-A kind can report state. Castr uses it for border/status/control indicators.
+A kind can report state. tpane uses it for border/status/control indicators.
 
 ```lua
-castr.kind {
+tpane.kind {
   name = "worker",
   match = "worker",
   state = function(pane)
-    if pane:var("@castr_push_state") == "blocked" then return "blocked" end
+    if pane:var("@tpane_push_state") == "blocked" then return "blocked" end
     if pane:capture():match("Running") then return "working" end
     return "idle"
   end,
@@ -72,7 +72,7 @@ idle_seen
 
 ## Pane objects
 
-Kind callbacks, key handlers, events, and `castr.panes()` use pane objects.
+Kind callbacks, key handlers, events, and `tpane.panes()` use pane objects.
 
 Fields:
 
@@ -88,7 +88,7 @@ pane.active        -- true if focused
 pane.zoomed        -- true if the window is zoomed
 pane.kind          -- detected kind
 pane.label         -- shown label
-pane.tag           -- user tag set by castr
+pane.tag           -- user tag set by tpane
 pane.home          -- user home window for stashed panes
 pane.state         -- current state, if any
 ```
@@ -113,8 +113,8 @@ end)
 ## Find panes
 
 ```lua
-local pane = castr.find { tag = "logs", window = current.window }
-local agents = castr.find_all { tag = "agent" }
+local pane = tpane.find { tag = "logs", window = current.window }
+local agents = tpane.find_all { tag = "agent" }
 ```
 
 All fields in the query must match.
@@ -124,7 +124,7 @@ All fields in the query must match.
 Register a pane you want to show/hide later:
 
 ```lua
-castr.register_pane("logs", {
+tpane.register_pane("logs", {
   dir = "below",
   size = "25%",
   command = "zsh",
@@ -134,12 +134,12 @@ castr.register_pane("logs", {
 Bind keys to it:
 
 ```lua
-castr.bind_key("root", "M-e", function(pane)
-  castr.toggle(pane, "logs")
+tpane.bind_key("root", "M-e", function(pane)
+  tpane.toggle(pane, "logs")
 end)
 
-castr.bind_key("root", "M-E", function(pane)
-  castr.expand(pane, "logs")
+tpane.bind_key("root", "M-E", function(pane)
+  tpane.expand(pane, "logs")
 end)
 ```
 
@@ -164,7 +164,7 @@ blocked_message = "..."   -- shown instead of hiding a blocked pane
 Use this when you do not need a registered pane:
 
 ```lua
-local logs = castr.split(pane, {
+local logs = tpane.split(pane, {
   dir = "below",
   size = "25%",
   command = "zsh",
@@ -177,8 +177,8 @@ It returns a pane handle.
 ## Key bindings
 
 ```lua
-castr.bind_key("a", function(pane)
-  castr.toggle(pane, "logs")
+tpane.bind_key("a", function(pane)
+  tpane.toggle(pane, "logs")
 end)
 ```
 
@@ -187,8 +187,8 @@ The function receives the pane that invoked the binding.
 Bind to a command instead:
 
 ```lua
-castr.bind_key("a", { "hello" })
-castr.bind_key("Space", { "control" }, { popup = true })
+tpane.bind_key("a", { "hello" })
+tpane.bind_key("Space", { "control" }, { popup = true })
 ```
 
 Options: `popup`, `context`.
@@ -198,7 +198,7 @@ Options: `popup`, `context`.
 Use commands when you want a CLI verb:
 
 ```lua
-castr.command("hello", function(args)
+tpane.command("hello", function(args)
   return "hi " .. (args[1] or "")
 end)
 ```
@@ -206,13 +206,13 @@ end)
 Then:
 
 ```sh
-castr hello there
+tpane hello there
 ```
 
 ## Panels
 
 ```lua
-castr.panel {
+tpane.panel {
   id = "workspace",
   title = "Workspace",
   cards = function()
@@ -226,11 +226,11 @@ castr.panel {
 ## Events
 
 ```lua
-castr.on("tick", function() end)
-castr.on("pane:new", function(pane) end)
-castr.on("pane:focus", function(pane) end)
-castr.on("window:close", function(window_id) end)
-castr.on("state:change", function(pane_id) end)
+tpane.on("tick", function() end)
+tpane.on("pane:new", function(pane) end)
+tpane.on("pane:focus", function(pane) end)
+tpane.on("window:close", function(window_id) end)
+tpane.on("state:change", function(pane_id) end)
 ```
 
 ## Low-level tmux helpers
@@ -238,19 +238,22 @@ castr.on("state:change", function(pane_id) end)
 Use these when the helpers above are not enough:
 
 ```lua
-castr.tmux.split { target = pane.id, dir = "below", size = "25%", cwd = pane.cwd }
-castr.tmux.stash { pane = pane.id, window = pane.window, cwd = pane.cwd, name = "hidden" }
-castr.tmux.unstash { pane = hidden.id, target = pane.id, horizontal = true, size = "35%" }
-castr.tmux.unzoom(pane.window)
-castr.tmux.select(pane.id)
-castr.tmux.zoom(pane.id) -- tmux resize-pane -Z
-castr.tmux.display { target = pane.id, message = "message" }
+local window = tpane.tmux.new_window { name = "logs", cwd = pane.cwd, command = "zsh" }
+tpane.tmux.select_window(window)
+tpane.tmux.send_keys { target = pane.id, keys = "npm test", enter = true }
+tpane.tmux.split { target = pane.id, dir = "below", size = "25%", cwd = pane.cwd }
+tpane.tmux.stash { pane = pane.id, window = pane.window, cwd = pane.cwd, name = "hidden" }
+tpane.tmux.unstash { pane = hidden.id, target = pane.id, horizontal = true, size = "35%" }
+tpane.tmux.unzoom(pane.window)
+tpane.tmux.select(pane.id)
+tpane.tmux.zoom(pane.id) -- tmux resize-pane -Z
+tpane.tmux.display { target = pane.id, message = "message" }
 ```
 
 ## Compatibility aliases
 
 ```lua
-castr.register_kind    -- castr.kind
-castr.register_command -- castr.command
-castr.register_panel   -- castr.panel
+tpane.register_kind    -- tpane.kind
+tpane.register_command -- tpane.command
+tpane.register_panel   -- tpane.panel
 ```

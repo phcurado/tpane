@@ -26,7 +26,7 @@ use crossterm::{
 use protocol::{PaneSnapshot, PanelView, Request, Response};
 
 #[derive(Debug, Parser)]
-#[command(name = "castr")]
+#[command(name = "tpane")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -62,7 +62,7 @@ enum Commands {
         clean: bool,
     },
 
-    /// Show or act on live castr pane state.
+    /// Show or act on live tpane pane state.
     Control {
         #[arg(long)]
         once: bool,
@@ -126,10 +126,10 @@ fn launch() -> Result<()> {
     ensure_daemon()?;
     tmux::install_render_options()?;
 
-    if tmux::has_session("castr") {
-        tmux::attach_session("castr")
+    if tmux::has_session("tpane") {
+        tmux::attach_session("tpane")
     } else {
-        tmux::new_session("castr")
+        tmux::new_session("tpane")
     }
 }
 
@@ -159,7 +159,7 @@ fn ensure_daemon() -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("failed to spawn castr daemon")?;
+        .context("failed to spawn tpane daemon")?;
 
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
@@ -169,7 +169,7 @@ fn ensure_daemon() -> Result<()> {
         thread::sleep(Duration::from_millis(100));
     }
 
-    bail!("castr daemon did not become ready at {}", socket.display())
+    bail!("tpane daemon did not become ready at {}", socket.display())
 }
 
 fn reload_at(socket: &PathBuf) -> Result<()> {
@@ -180,7 +180,7 @@ fn reload_at(socket: &PathBuf) -> Result<()> {
         bail!(
             response
                 .error
-                .unwrap_or_else(|| "castr reload failed".to_string())
+                .unwrap_or_else(|| "tpane reload failed".to_string())
         )
     }
 }
@@ -212,7 +212,7 @@ fn print_response(response: Response) -> Result<()> {
         bail!(
             response
                 .error
-                .unwrap_or_else(|| "castr request failed".to_string())
+                .unwrap_or_else(|| "tpane request failed".to_string())
         )
     }
 }
@@ -467,7 +467,7 @@ fn render_control_tui(
     )?;
     write_raw_line(
         &mut stdout,
-        "castr control  q:quit  j/k:move  /:filter  enter:open  x:expand",
+        "tpane control  q:quit  j/k:move  /:filter  enter:open  x:expand",
     )?;
     if filtering || !filter.is_empty() {
         write_raw_line(&mut stdout, &format!("filter: {filter}"))?;
@@ -562,7 +562,7 @@ fn print_panel_group(panel: &PanelView, tag: &str, title: &str) {
 }
 
 fn print_control(panes: &[PaneSnapshot], current_window: Option<&str>) {
-    println!("castr");
+    println!("tpane");
     if panes.is_empty() {
         println!("  no panes");
         return;
@@ -622,8 +622,8 @@ fn socket_path() -> Result<PathBuf> {
     let key = tmux_server_key();
     let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| env::temp_dir().join(format!("castr-{}", current_uid())));
-    Ok(runtime_dir.join(format!("castr-{key}.sock")))
+        .unwrap_or_else(|| env::temp_dir().join(format!("tpane-{}", current_uid())));
+    Ok(runtime_dir.join(format!("tpane-{key}.sock")))
 }
 
 fn tmux_server_key() -> String {
@@ -662,13 +662,13 @@ mod tests {
 
     #[test]
     fn known_subcommand_keeps_priority_over_external() {
-        let cli = Cli::try_parse_from(["castr", "status"]).unwrap();
+        let cli = Cli::try_parse_from(["tpane", "status"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Status)));
     }
 
     #[test]
     fn unknown_subcommand_is_forwarded_as_external_command() {
-        let cli = Cli::try_parse_from(["castr", "hello", "a", "b"]).unwrap();
+        let cli = Cli::try_parse_from(["tpane", "hello", "a", "b"]).unwrap();
         match cli.command {
             Some(Commands::External(parts)) => assert_eq!(parts, ["hello", "a", "b"]),
             other => panic!("expected external command, got wrong variant: {other:?}"),
@@ -677,13 +677,13 @@ mod tests {
 
     #[test]
     fn control_is_a_builtin_command() {
-        let cli = Cli::try_parse_from(["castr", "control"]).unwrap();
+        let cli = Cli::try_parse_from(["tpane", "control"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Control { .. })));
     }
 
     #[test]
     fn control_actions_parse_as_builtin_command() {
-        let cli = Cli::try_parse_from(["castr", "control", "expand", "%1"]).unwrap();
+        let cli = Cli::try_parse_from(["tpane", "control", "expand", "%1"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Commands::Control {

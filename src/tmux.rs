@@ -13,9 +13,9 @@ pub struct PaneInfo {
     pub active: bool,
     pub zoomed: bool,
     pub tag: Option<String>,
-    pub migrate_tag: bool,
     pub home: Option<String>,
     pub state: Option<String>,
+    pub migrate_legacy: bool,
 }
 
 pub fn start_server() -> Result<()> {
@@ -63,7 +63,7 @@ pub fn install_render_options() -> Result<()> {
         "set-option",
         "-g",
         "pane-border-format",
-        "#{?#{==:#{@castr_state},blocked},#[fg=red]● #[default],#{?#{==:#{@castr_state},working},#[fg=yellow]● #[default],#{?#{==:#{@castr_state},done_unseen},#[fg=blue]● #[default],#{?#{==:#{@castr_state},idle_seen},#[fg=green]● #[default],}}}}#{?@castr_label,#[fg=yellow]#{@castr_label}#[default],#{pane_current_command}}",
+        "#{?#{==:#{@tpane_state},blocked},#[fg=red]● #[default],#{?#{==:#{@tpane_state},working},#[fg=yellow]● #[default],#{?#{==:#{@tpane_state},done_unseen},#[fg=blue]● #[default],#{?#{==:#{@tpane_state},idle_seen},#[fg=green]● #[default],}}}}#{?@tpane_label,#[fg=yellow]#{@tpane_label}#[default],#{pane_current_command}}",
     ])?;
     Ok(())
 }
@@ -73,7 +73,7 @@ pub fn list_panes() -> Result<Vec<PaneInfo>> {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{session_name}\t#{window_id}\t#{pane_active}\t#{window_zoomed_flag}\t#{@castr_tag}\t#{@castr_role}\t#{@castr_home}\t#{@castr_state}",
+        "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{session_name}\t#{window_id}\t#{pane_active}\t#{window_zoomed_flag}\t#{@tpane_tag}\t#{@castr_tag}\t#{@castr_role}\t#{@tpane_home}\t#{@castr_home}\t#{@tpane_state}\t#{@castr_state}",
     ])?;
 
     output
@@ -84,7 +84,7 @@ pub fn list_panes() -> Result<Vec<PaneInfo>> {
 }
 
 fn parse_pane_info(line: &str) -> Result<PaneInfo> {
-    let mut parts = line.splitn(13, '\t');
+    let mut parts = line.splitn(15, '\t');
     let id = parts
         .next()
         .ok_or_else(|| anyhow!("missing pane id in tmux output"))?
@@ -100,12 +100,19 @@ fn parse_pane_info(line: &str) -> Result<PaneInfo> {
     let window = parts.next().unwrap_or_default().to_string();
     let active = parts.next() == Some("1");
     let zoomed = parts.next() == Some("1");
-    let raw_tag = nonempty(parts.next().unwrap_or_default());
-    let old_role = nonempty(parts.next().unwrap_or_default());
-    let migrate_tag = raw_tag.is_none() && old_role.is_some();
-    let tag = raw_tag.or(old_role);
-    let home = nonempty(parts.next().unwrap_or_default());
-    let state = nonempty(parts.next().unwrap_or_default());
+    let tpane_tag = nonempty(parts.next().unwrap_or_default());
+    let castr_tag = nonempty(parts.next().unwrap_or_default());
+    let castr_role = nonempty(parts.next().unwrap_or_default());
+    let tpane_home = nonempty(parts.next().unwrap_or_default());
+    let castr_home = nonempty(parts.next().unwrap_or_default());
+    let tpane_state = nonempty(parts.next().unwrap_or_default());
+    let castr_state = nonempty(parts.next().unwrap_or_default());
+    let migrate_legacy = tpane_tag.is_none() && (castr_tag.is_some() || castr_role.is_some())
+        || tpane_home.is_none() && castr_home.is_some()
+        || tpane_state.is_none() && castr_state.is_some();
+    let tag = tpane_tag.or(castr_tag).or(castr_role);
+    let home = tpane_home.or(castr_home);
+    let state = tpane_state.or(castr_state);
     Ok(PaneInfo {
         id,
         pid,
@@ -116,9 +123,9 @@ fn parse_pane_info(line: &str) -> Result<PaneInfo> {
         active,
         zoomed,
         tag,
-        migrate_tag,
         home,
         state,
+        migrate_legacy,
     })
 }
 
@@ -128,6 +135,66 @@ fn nonempty(value: &str) -> Option<String> {
 
 pub fn bind_key(mode: &str, key: &str, command: &str, popup: bool) -> Result<()> {
     tmux_owned(bind_key_args(mode, key, command, popup)).map(|_| ())
+}
+
+pub struct NewWindowOptions {
+    pub name: Option<String>,
+    pub cwd: Option<String>,
+    pub command: Option<String>,
+}
+
+pub fn new_window(opts: NewWindowOptions) -> Result<String> {
+    tmux_owned(new_window_args(&opts))
+}
+
+fn new_window_args(opts: &NewWindowOptions) -> Vec<String> {
+    let mut args = vec![
+        "new-window".to_string(),
+        "-P".to_string(),
+        "-F".to_string(),
+        "#{window_id}".to_string(),
+    ];
+    if let Some(name) = &opts.name {
+        args.push("-n".to_string());
+        args.push(name.clone());
+    }
+    if let Some(cwd) = &opts.cwd {
+        args.push("-c".to_string());
+        args.push(cwd.clone());
+    }
+    if let Some(command) = &opts.command {
+        args.push(command.clone());
+    }
+    args
+}
+
+pub fn select_window(target: &str) -> Result<()> {
+    tmux_owned(select_window_args(target)).map(|_| ())
+}
+
+fn select_window_args(target: &str) -> Vec<String> {
+    vec![
+        "select-window".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+    ]
+}
+
+pub fn send_keys(target: &str, keys: &str, enter: bool) -> Result<()> {
+    tmux_owned(send_keys_args(target, keys, enter)).map(|_| ())
+}
+
+fn send_keys_args(target: &str, keys: &str, enter: bool) -> Vec<String> {
+    let mut args = vec![
+        "send-keys".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+        keys.to_string(),
+    ];
+    if enter {
+        args.push("Enter".to_string());
+    }
+    args
 }
 
 fn bind_key_args(mode: &str, key: &str, command: &str, popup: bool) -> Vec<String> {
@@ -492,8 +559,9 @@ mod tests {
 
     #[test]
     fn parse_pane_info_reads_window_id_tag_and_home() {
-        let pane = parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t1\t0\tagent\t\t@7\tblocked")
-            .unwrap();
+        let pane =
+            parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t1\t0\tagent\t\t\t@7\t\tblocked\t")
+                .unwrap();
         assert_eq!(pane.id, "%1");
         assert_eq!(pane.pid, 42);
         assert_eq!(pane.command, "zsh");
@@ -501,18 +569,18 @@ mod tests {
         assert!(pane.active);
         assert!(!pane.zoomed);
         assert_eq!(pane.tag.as_deref(), Some("agent"));
-        assert!(!pane.migrate_tag);
+        assert!(!pane.migrate_legacy);
         assert_eq!(pane.home.as_deref(), Some("@7"));
         assert_eq!(pane.state.as_deref(), Some("blocked"));
     }
 
     #[test]
     fn parse_pane_info_treats_empty_tag_and_home_as_none() {
-        let pane = parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t0\t1\t\t\t\t").unwrap();
+        let pane = parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t0\t1\t\t\t\t\t\t\t").unwrap();
         assert!(!pane.active);
         assert!(pane.zoomed);
         assert_eq!(pane.tag, None);
-        assert!(!pane.migrate_tag);
+        assert!(!pane.migrate_legacy);
         assert_eq!(pane.home, None);
         assert_eq!(pane.state, None);
     }
@@ -520,24 +588,26 @@ mod tests {
     #[test]
     fn parse_pane_info_migrates_old_role_to_tag() {
         let pane =
-            parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t0\t0\t\tagent\t@7\t").unwrap();
+            parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t0\t0\t\t\tagent\t\t@7\t\tblocked")
+                .unwrap();
         assert_eq!(pane.tag.as_deref(), Some("agent"));
-        assert!(pane.migrate_tag);
+        assert!(pane.migrate_legacy);
         assert_eq!(pane.home.as_deref(), Some("@7"));
+        assert_eq!(pane.state.as_deref(), Some("blocked"));
     }
 
     #[test]
     fn bind_key_args_are_built_without_running_tmux() {
         assert_eq!(
-            bind_key_args("prefix", "A", "castr pi expand", false),
-            vec!["bind-key", "A", "run-shell", "-b", "castr pi expand"]
+            bind_key_args("prefix", "A", "tpane pi expand", false),
+            vec!["bind-key", "A", "run-shell", "-b", "tpane pi expand"]
         );
         assert_eq!(
-            bind_key_args("root", "M-a", "castr pi", false),
-            vec!["bind-key", "-n", "M-a", "run-shell", "-b", "castr pi"]
+            bind_key_args("root", "M-a", "tpane pi", false),
+            vec!["bind-key", "-n", "M-a", "run-shell", "-b", "tpane pi"]
         );
         assert_eq!(
-            bind_key_args("copy-mode-vi", "v", "castr copy", false),
+            bind_key_args("copy-mode-vi", "v", "tpane copy", false),
             vec![
                 "bind-key",
                 "-T",
@@ -545,11 +615,11 @@ mod tests {
                 "v",
                 "run-shell",
                 "-b",
-                "castr copy"
+                "tpane copy"
             ]
         );
         assert_eq!(
-            bind_key_args("prefix", "Space", "castr control", true),
+            bind_key_args("prefix", "Space", "tpane control", true),
             vec![
                 "bind-key",
                 "Space",
@@ -559,8 +629,39 @@ mod tests {
                 "80%",
                 "-h",
                 "80%",
-                "castr control"
+                "tpane control"
             ]
+        );
+    }
+
+    #[test]
+    fn window_and_send_key_args_are_built_without_running_tmux() {
+        assert_eq!(
+            new_window_args(&NewWindowOptions {
+                name: Some("logs".to_string()),
+                cwd: Some("/tmp/work".to_string()),
+                command: Some("zsh".to_string()),
+            }),
+            vec![
+                "new-window",
+                "-P",
+                "-F",
+                "#{window_id}",
+                "-n",
+                "logs",
+                "-c",
+                "/tmp/work",
+                "zsh",
+            ]
+        );
+        assert_eq!(select_window_args("@7"), vec!["select-window", "-t", "@7"]);
+        assert_eq!(
+            send_keys_args("%1", "npm test", true),
+            vec!["send-keys", "-t", "%1", "npm test", "Enter"]
+        );
+        assert_eq!(
+            send_keys_args("%1", "C-c", false),
+            vec!["send-keys", "-t", "%1", "C-c"]
         );
     }
 

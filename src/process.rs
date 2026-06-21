@@ -165,12 +165,12 @@ mod tests {
     #[test]
     fn parse_ps_processes_handles_commands_with_spaces() {
         let processes = parse_ps_processes(
-            "  10   1 /bin/zsh -l\n  11  10 pi --project /tmp/castr\n garbage\n",
+            "  10   1 /bin/zsh -l\n  11  10 pi --project /tmp/tpane\n garbage\n",
         );
         assert_eq!(processes.get(&10).unwrap().ppid, 1);
         assert_eq!(processes.get(&10).unwrap().argv, "/bin/zsh -l");
         assert_eq!(processes.get(&11).unwrap().ppid, 10);
-        assert_eq!(processes.get(&11).unwrap().argv, "pi --project /tmp/castr");
+        assert_eq!(processes.get(&11).unwrap().argv, "pi --project /tmp/tpane");
         assert!(!processes.contains_key(&0));
     }
 }

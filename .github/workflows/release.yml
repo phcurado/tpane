@@ -44,13 +44,13 @@ jobs:
         run: |
           set -eu
           version="${GITHUB_REF_NAME#v}"
-          name="castr_${version}_${{ matrix.os }}_${{ matrix.arch }}"
+          name="tpane_${version}_${{ matrix.os }}_${{ matrix.arch }}"
           mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/castr" "dist/$name/castr"
-          tar -C "dist/$name" -czf "dist/$name.tar.gz" castr
+          cp "target/${{ matrix.target }}/release/tpane" "dist/$name/tpane"
+          tar -C "dist/$name" -czf "dist/$name.tar.gz" tpane
       - uses: actions/upload-artifact@v4
         with:
-          name: castr-${{ matrix.os }}-${{ matrix.arch }}
+          name: tpane-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*.tar.gz
 
   release:

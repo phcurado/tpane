@@ -155,7 +155,7 @@ impl LuaRuntime {
     }
 
     fn install_api(&self) -> Result<()> {
-        let castr = self.lua.create_table().map_err(lua_err)?;
+        let tpane = self.lua.create_table().map_err(lua_err)?;
         let kinds = Rc::clone(&self.kinds);
         let register_kind = self
             .lua
@@ -206,10 +206,10 @@ impl LuaRuntime {
                 Ok(())
             })
             .map_err(lua_err)?;
-        castr
+        tpane
             .set("register_kind", register_kind.clone())
             .map_err(lua_err)?;
-        castr.set("kind", register_kind).map_err(lua_err)?;
+        tpane.set("kind", register_kind).map_err(lua_err)?;
 
         let commands = Rc::clone(&self.commands);
         let register_command = self
@@ -223,7 +223,7 @@ impl LuaRuntime {
                     }
                     _ => {
                         return Err(mlua::Error::RuntimeError(
-                            "expected castr.command{name=..., handler=...} or castr.command(name, fn)"
+                            "expected tpane.command{name=..., handler=...} or tpane.command(name, fn)"
                                 .to_string(),
                         ));
                     }
@@ -233,10 +233,10 @@ impl LuaRuntime {
                 Ok(())
             })
             .map_err(lua_err)?;
-        castr
+        tpane
             .set("command", register_command.clone())
             .map_err(lua_err)?;
-        castr
+        tpane
             .set("register_command", register_command)
             .map_err(lua_err)?;
 
@@ -249,7 +249,7 @@ impl LuaRuntime {
                 Ok(())
             })
             .map_err(lua_err)?;
-        castr.set("on", on).map_err(lua_err)?;
+        tpane.set("on", on).map_err(lua_err)?;
 
         let keybinds = Rc::clone(&self.keybinds);
         let key_commands = Rc::clone(&self.commands);
@@ -264,7 +264,7 @@ impl LuaRuntime {
                 Ok(())
             })
             .map_err(lua_err)?;
-        castr.set("bind_key", bind_key).map_err(lua_err)?;
+        tpane.set("bind_key", bind_key).map_err(lua_err)?;
 
         let panels = Rc::clone(&self.panels);
         let register_panel = self
@@ -281,10 +281,10 @@ impl LuaRuntime {
                 Ok(())
             })
             .map_err(lua_err)?;
-        castr
+        tpane
             .set("panel", register_panel.clone())
             .map_err(lua_err)?;
-        castr
+        tpane
             .set("register_panel", register_panel)
             .map_err(lua_err)?;
 
@@ -293,19 +293,19 @@ impl LuaRuntime {
             .lua
             .create_function(move |lua, ()| snapshots_table(lua, &panes.borrow()))
             .map_err(lua_err)?;
-        castr.set("panes", panes_fn).map_err(lua_err)?;
+        tpane.set("panes", panes_fn).map_err(lua_err)?;
 
         let pane_fn = self
             .lua
             .create_function(move |lua, pane_id: String| pane_ref_table(lua, &pane_id))
             .map_err(lua_err)?;
-        castr.set("pane", pane_fn).map_err(lua_err)?;
+        tpane.set("pane", pane_fn).map_err(lua_err)?;
 
-        castr.set("tmux", tmux_api(&self.lua)?).map_err(lua_err)?;
-        castr
+        tpane.set("tmux", tmux_api(&self.lua)?).map_err(lua_err)?;
+        tpane
             .set("with_pane", with_pane_fn(&self.lua)?)
             .map_err(lua_err)?;
-        self.lua.globals().set("castr", castr).map_err(lua_err)?;
+        self.lua.globals().set("tpane", tpane).map_err(lua_err)?;
         Ok(())
     }
 
@@ -535,7 +535,7 @@ fn parse_bind_key(
             })
         }
         _ => Err(mlua::Error::RuntimeError(
-            "expected castr.bind_key(key, command[, opts]) or castr.bind_key(table, key, command[, opts])"
+            "expected tpane.bind_key(key, command[, opts]) or tpane.bind_key(table, key, command[, opts])"
                 .to_string(),
         )),
     }
@@ -552,7 +552,7 @@ fn parse_bind_command_value(
         Value::Function(function) => {
             let idx = generated.get() + 1;
             generated.set(idx);
-            let name = format!("__castr_key_{idx}");
+            let name = format!("__tpane_key_{idx}");
             let panes = Rc::clone(panes);
             let handler = lua.create_function(move |lua, args: Table| {
                 let pane = args
@@ -627,11 +627,11 @@ fn parse_keybind_command(value: Value) -> mlua::Result<Vec<String>> {
 }
 
 pub(crate) fn config_dir() -> PathBuf {
-    env::var_os("CASTR_CONFIG_DIR")
+    env::var_os("TPANE_CONFIG_DIR")
         .map(PathBuf::from)
-        .or_else(|| env::var_os("XDG_CONFIG_HOME").map(|home| PathBuf::from(home).join("castr")))
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/castr")))
-        .unwrap_or_else(|| PathBuf::from(".config/castr"))
+        .or_else(|| env::var_os("XDG_CONFIG_HOME").map(|home| PathBuf::from(home).join("tpane")))
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/tpane")))
+        .unwrap_or_else(|| PathBuf::from(".config/tpane"))
 }
 
 fn pane_ref_table(lua: &Lua, pane_id: &str) -> mlua::Result<Table> {
@@ -729,7 +729,7 @@ fn add_pane_table_methods(
 fn set_pane_fields(pane_id: &str, table: Table) -> mlua::Result<()> {
     for name in ["kind", "label", "state", "tag", "home"] {
         if let Some(value) = table.get::<Option<String>>(name)? {
-            tmux::set_pane_var(pane_id, &format!("@castr_{name}"), &value)
+            tmux::set_pane_var(pane_id, &format!("@tpane_{name}"), &value)
                 .map_err(mlua_external)?;
         }
     }
@@ -824,6 +824,41 @@ fn tmux_api(lua: &Lua) -> Result<Table> {
         .map_err(lua_err)?;
     table
         .set(
+            "new_window",
+            lua.create_function(|_, opts: Table| {
+                tmux::new_window(tmux::NewWindowOptions {
+                    name: opts.get("name")?,
+                    cwd: opts.get("cwd")?,
+                    command: opts.get("command")?,
+                })
+                .map_err(mlua_external)
+            })
+            .map_err(lua_err)?,
+        )
+        .map_err(lua_err)?;
+    table
+        .set(
+            "select_window",
+            lua.create_function(|_, target: String| {
+                tmux::select_window(&target).map_err(mlua_external)
+            })
+            .map_err(lua_err)?,
+        )
+        .map_err(lua_err)?;
+    table
+        .set(
+            "send_keys",
+            lua.create_function(|_, opts: Table| {
+                let target: String = opts.get("target")?;
+                let keys: String = opts.get("keys")?;
+                let enter = opts.get::<Option<bool>>("enter")?.unwrap_or(false);
+                tmux::send_keys(&target, &keys, enter).map_err(mlua_external)
+            })
+            .map_err(lua_err)?,
+        )
+        .map_err(lua_err)?;
+    table
+        .set(
             "display",
             lua.create_function(|_, opts: Table| {
                 let target: String = opts.get("target")?;
@@ -884,7 +919,7 @@ fn tmux_api(lua: &Lua) -> Result<Table> {
             lua.create_function(|_, opts: Table| {
                 let pane: String = opts.get("pane")?;
                 let session: String = opts.get("session")?;
-                let name: String = opts.get("name").unwrap_or_else(|_| "castr".to_string());
+                let name: String = opts.get("name").unwrap_or_else(|_| "tpane".to_string());
                 tmux::break_pane(&pane, &session, &name).map_err(mlua_external)
             })
             .map_err(lua_err)?,
@@ -904,7 +939,7 @@ fn tmux_api(lua: &Lua) -> Result<Table> {
                     pane: opts.get("pane")?,
                     window: opts.get("window")?,
                     cwd: opts.get("cwd")?,
-                    name: opts.get("name").unwrap_or_else(|_| "castr".to_string()),
+                    name: opts.get("name").unwrap_or_else(|_| "tpane".to_string()),
                 })
                 .map_err(mlua_external)
             })
@@ -978,7 +1013,7 @@ impl PaneGuard {
             tmux::zoom(pane_id)?;
         }
         if let Some(state) = opts.get::<Option<String>>("state").map_err(lua_err)? {
-            tmux::set_pane_var(pane_id, "@castr_state", &state)?;
+            tmux::set_pane_var(pane_id, "@tpane_state", &state)?;
         }
         Ok(Self {
             pane_id: pane_id.to_string(),
@@ -1114,22 +1149,22 @@ fn basename(path: &str) -> String {
 }
 
 const PRELUDE: &str = r#"
-castr._pane_defs = {}
+tpane._pane_defs = {}
 
-function castr.register_pane(name, opts)
+function tpane.register_pane(name, opts)
   opts.tag = opts.tag or name
   opts.name = opts.name or name
-  castr._pane_defs[name] = opts
+  tpane._pane_defs[name] = opts
   return opts
 end
 
 local function pane_opts(opts)
-  if type(opts) == "string" then return castr._pane_defs[opts] end
+  if type(opts) == "string" then return tpane._pane_defs[opts] end
   return opts
 end
 
-function castr.find(query)
-  for _, pane in ipairs(castr.panes()) do
+function tpane.find(query)
+  for _, pane in ipairs(tpane.panes()) do
     local ok = true
     for key, expected in pairs(query) do
       if pane[key] ~= expected then
@@ -1141,9 +1176,9 @@ function castr.find(query)
   end
 end
 
-function castr.find_all(query)
+function tpane.find_all(query)
   local found = {}
-  for _, pane in ipairs(castr.panes()) do
+  for _, pane in ipairs(tpane.panes()) do
     local ok = true
     for key, expected in pairs(query) do
       if pane[key] ~= expected then
@@ -1156,23 +1191,23 @@ function castr.find_all(query)
   return found
 end
 
-function castr.resolve(target)
+function tpane.resolve(target)
   if type(target) == "string" then return target end
   if target and target.id then return target.id end
-  local pane = castr.find(target)
+  local pane = tpane.find(target)
   return pane and pane.id
 end
 
-function castr.split(pane, opts)
-  local id = castr.tmux.split {
-    target = castr.resolve(pane),
+function tpane.split(pane, opts)
+  local id = tpane.tmux.split {
+    target = tpane.resolve(pane),
     dir = opts.dir or opts.direction,
     size = opts.size,
     cwd = opts.cwd,
     command = opts.command,
     detached = opts.detached,
   }
-  local created = castr.pane(id)
+  local created = tpane.pane(id)
   if opts.tag then created:set { tag = opts.tag } end
   return created
 end
@@ -1186,22 +1221,22 @@ local function companion_horizontal(opts)
 end
 
 local function show_companion(from, opts)
-  local visible = castr.find(companion_query(from, opts))
+  local visible = tpane.find(companion_query(from, opts))
   if visible then return visible end
 
-  local hidden = castr.find { session = "__pi-hidden-" .. from.window, tag = opts.tag, home = from.window }
+  local hidden = tpane.find { session = "__pi-hidden-" .. from.window, tag = opts.tag, home = from.window }
   if hidden then
-    castr.tmux.unstash {
+    tpane.tmux.unstash {
       pane = hidden.id,
       target = from.id,
       horizontal = companion_horizontal(opts),
       size = opts.size,
     }
-    castr.tmux.select(hidden.id)
+    tpane.tmux.select(hidden.id)
     return hidden
   end
 
-  local pane = castr.split(from, {
+  local pane = tpane.split(from, {
     dir = opts.dir,
     size = opts.size,
     cwd = from.cwd,
@@ -1210,34 +1245,34 @@ local function show_companion(from, opts)
     tag = opts.tag,
   })
   pane:set { home = from.window, title = opts.title, label = opts.label }
-  castr.tmux.select(pane.id)
+  tpane.tmux.select(pane.id)
   return pane
 end
 
 local raw_toggle = function(target)
-  local id = castr.resolve(target)
+  local id = tpane.resolve(target)
   if not id then return false end
-  castr.tmux.zoom(id)
+  tpane.tmux.zoom(id)
   return true
 end
 
-function castr.toggle(target, opts)
+function tpane.toggle(target, opts)
   if not opts then return raw_toggle(target) end
   opts = pane_opts(opts)
   if not opts then return false end
 
-  local visible = castr.find(companion_query(target, opts))
+  local visible = tpane.find(companion_query(target, opts))
   if not visible then
     show_companion(target, opts)
     return true
   end
 
   if visible.state == "blocked" and opts.blocked_message then
-    castr.tmux.display { target = visible.id, message = opts.blocked_message }
+    tpane.tmux.display { target = visible.id, message = opts.blocked_message }
     return false
   end
 
-  castr.tmux.stash {
+  tpane.tmux.stash {
     pane = visible.id,
     window = target.window,
     cwd = target.cwd,
@@ -1246,25 +1281,25 @@ function castr.toggle(target, opts)
   return true
 end
 
-function castr.expand(target, opts)
+function tpane.expand(target, opts)
   if opts then
     opts = pane_opts(opts)
     if not opts then return false end
     target = show_companion(target, opts)
   end
 
-  local id = castr.resolve(target)
+  local id = tpane.resolve(target)
   if not id then return false end
 
-  local window = castr.tmux.window_id(id)
-  if castr.tmux.is_zoomed(window) and castr.tmux.active_pane(window) == id then
-    castr.tmux.unzoom(window)
+  local window = tpane.tmux.window_id(id)
+  if tpane.tmux.is_zoomed(window) and tpane.tmux.active_pane(window) == id then
+    tpane.tmux.unzoom(window)
     return true
   end
 
-  castr.tmux.unzoom(window)
-  castr.tmux.select(id)
-  castr.tmux.zoom(id)
+  tpane.tmux.unzoom(window)
+  tpane.tmux.select(id)
+  tpane.tmux.zoom(id)
   return true
 end
 "#;
@@ -1272,12 +1307,12 @@ end
 const STARTER_FILES: &[(&str, &str)] = &[
     (
         "10-psql.lua",
-        r#"castr.kind { name = "psql", match = "psql" }
+        r#"tpane.kind { name = "psql", match = "psql" }
 "#,
     ),
     (
         "20-hello.lua",
-        r#"castr.command {
+        r#"tpane.command {
   name = "hello",
   handler = function()
     return "hi"
@@ -1287,12 +1322,12 @@ const STARTER_FILES: &[(&str, &str)] = &[
     ),
     (
         "30-panel.lua",
-        r#"castr.panel {
+        r#"tpane.panel {
   id = "panes",
   title = "Panes",
   cards = function()
     local cards = {}
-    for _, p in ipairs(castr.panes()) do
+    for _, p in ipairs(tpane.panes()) do
       cards[#cards + 1] = {
         title = p.label,
         subtitle = p.window,
@@ -1310,14 +1345,14 @@ const STARTER_FILES: &[(&str, &str)] = &[
 
 const BUILTIN_KINDS: &str = r#"
 local function agent_state(p)
-  local pushed = p:var("@castr_push_state")
+  local pushed = p:var("@tpane_push_state")
   if pushed == "blocked" then return "blocked" end
   local out = p:capture()
   if out:match("esc to interrupt") or out:match("[Ww]orking through it") then return "working" end
   return "idle"
 end
 
-castr.kind {
+tpane.kind {
   name = "pi",
   detect = function(p)
     return p:running("pi-coding-agent")
@@ -1331,9 +1366,9 @@ castr.kind {
   state = agent_state,
 }
 
-castr.kind { name = "nvim", match = "nvim" }
+tpane.kind { name = "nvim", match = "nvim" }
 
-castr.kind {
+tpane.kind {
   name = "claude",
   match = "claude",
   label = function(_p)
@@ -1343,7 +1378,7 @@ castr.kind {
   state = agent_state,
 }
 
-castr.kind {
+tpane.kind {
   name = "copilot",
   match = "copilot",
   label = function(_p)
@@ -1353,7 +1388,7 @@ castr.kind {
   state = agent_state,
 }
 
-castr.kind {
+tpane.kind {
   name = "pane",
   detect = function(_p)
     return true
@@ -1374,9 +1409,9 @@ mod tests {
             id: id.to_string(),
             pid: 123,
             kind: "term".to_string(),
-            label: "term · castr".to_string(),
-            cwd: "/tmp/castr".to_string(),
-            cwd_basename: "castr".to_string(),
+            label: "term · tpane".to_string(),
+            cwd: "/tmp/tpane".to_string(),
+            cwd_basename: "tpane".to_string(),
             command: "zsh".to_string(),
             session: "s".to_string(),
             window: "@1".to_string(),
@@ -1400,7 +1435,7 @@ mod tests {
 
     #[test]
     fn ensure_starter_config_writes_files_only_when_empty() {
-        let root = std::env::temp_dir().join(format!("castr-starter-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("tpane-starter-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         ensure_starter_config(&root);
         let mut files = Vec::new();
@@ -1417,7 +1452,7 @@ mod tests {
 
     #[test]
     fn collect_lua_files_recurses_under_config_dir() {
-        let root = std::env::temp_dir().join(format!("castr-lua-files-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("tpane-lua-files-{}", std::process::id()));
         let nested = root.join("anywhere/deeper");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(root.join("a.lua"), "").unwrap();
@@ -1462,9 +1497,9 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                castr.bind_key("a", { "pi" })
-                castr.bind_key("A", { "pi", "expand" })
-                castr.bind_key("root", "M-a", "pi expand")
+                tpane.bind_key("a", { "pi" })
+                tpane.bind_key("A", { "pi", "expand" })
+                tpane.bind_key("root", "M-a", "pi expand")
                 "#,
             )
             .unwrap();
@@ -1504,10 +1539,10 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                castr.register_pane("agent", { command = "pi" })
-                castr.command("check", function()
-                  local pane = castr.pane("%1")
-                  local cfg = castr._pane_defs.agent
+                tpane.register_pane("agent", { command = "pi" })
+                tpane.command("check", function()
+                  local pane = tpane.pane("%1")
+                  local cfg = tpane._pane_defs.agent
                   return pane.id .. ":" .. cfg.tag .. ":" .. cfg.name
                 end)
                 "#,
@@ -1527,11 +1562,11 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                function castr.expand()
+                function tpane.expand()
                   return "custom"
                 end
-                castr.command("check", function()
-                  return castr.expand()
+                tpane.command("check", function()
+                  return tpane.expand()
                 end)
                 "#,
             )
@@ -1556,9 +1591,9 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                castr.command("query", function()
-                  local one = castr.find{ tag = "agent" }
-                  local all = castr.find_all{ active = true }
+                tpane.command("query", function()
+                  local one = tpane.find{ tag = "agent" }
+                  local all = tpane.find_all{ active = true }
                   return one.id .. ":" .. #all
                 end)
                 "#,
@@ -1578,7 +1613,7 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                castr.bind_key("root", "M-e", function()
+                tpane.bind_key("root", "M-e", function()
                   return "ok"
                 end)
                 "#,
@@ -1588,10 +1623,10 @@ mod tests {
         let keybind = &runtime.keybinds()[0];
         assert_eq!(keybind.mode, "root");
         assert_eq!(keybind.key, "M-e");
-        assert_eq!(keybind.command, ["__castr_key_1"]);
+        assert_eq!(keybind.command, ["__tpane_key_1"]);
         assert_eq!(
             runtime
-                .run_command("__castr_key_1", &[])
+                .run_command("__tpane_key_1", &[])
                 .unwrap()
                 .as_deref(),
             Some("ok")
@@ -1604,7 +1639,7 @@ mod tests {
         let error = runtime
             .load_source(
                 "test.lua",
-                r#"castr.bind_key("a", { "pi" }, { desc = "unused" })"#,
+                r#"tpane.bind_key("a", { "pi" }, { desc = "unused" })"#,
             )
             .unwrap_err()
             .to_string();
@@ -1619,11 +1654,11 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                castr.register_panel{
+                tpane.register_panel{
                   id = "workspace",
                   title = "Workspace",
                   cards = function()
-                    local p = castr.panes()[1]
+                    local p = tpane.panes()[1]
                     return {{ title = p.label, subtitle = p.window, state = p.state, tag = p.tag, pane = p.id }}
                   end,
                 }
@@ -1644,11 +1679,11 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                castr.command {
+                tpane.command {
                   name = "hello",
                   handler = function() return "hi" end,
                 }
-                castr.panel {
+                tpane.panel {
                   id = "main",
                   title = "Main",
                   cards = function() return {} end,
@@ -1671,7 +1706,7 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                castr.register_command{
+                tpane.register_command{
                   name = "hello",
                   handler = function(args) return "hi " .. args[1] end,
                 }
@@ -1694,7 +1729,7 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                castr.register_command{
+                tpane.register_command{
                   name = "boom",
                   handler = function() error("nope") end,
                 }
@@ -1738,7 +1773,7 @@ mod tests {
         runtime
             .load_source(
                 "test.lua",
-                r#"castr.kind { name = "shell", match = "zsh" }"#,
+                r#"tpane.kind { name = "shell", match = "zsh" }"#,
             )
             .unwrap();
 
@@ -1754,9 +1789,9 @@ mod tests {
                     active: true,
                     zoomed: false,
                     tag: None,
-                    migrate_tag: false,
                     home: None,
                     state: None,
+                    migrate_legacy: false,
                 },
                 vec![ProcessInfo {
                     pid: 1,
@@ -1777,10 +1812,10 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                castr.register_command{
+                tpane.register_command{
                   name = "outer",
                   handler = function()
-                    castr.register_command{
+                    tpane.register_command{
                       name = "inner",
                       handler = function() return "inner ok" end,
                     }
@@ -1808,8 +1843,8 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                castr.on("tick", function()
-                  castr.on("tick", function() end)
+                tpane.on("tick", function()
+                  tpane.on("tick", function() end)
                 end)
                 "#,
             )
@@ -1826,10 +1861,10 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                castr.register_command{
+                tpane.register_command{
                   name = "pane_id",
                   handler = function()
-                    local panes = castr.panes()
+                    local panes = tpane.panes()
                     return panes[1].id .. ":" .. panes[1].kind .. ":" .. panes[1].pid .. ":" .. panes[1].tag .. ":" .. panes[1].home .. ":" .. panes[1].state
                   end,
                 }
@@ -1848,10 +1883,10 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                castr.register_command{
+                tpane.register_command{
                   name = "method_types",
                   handler = function()
-                    local p = castr.pane("%9")
+                    local p = tpane.pane("%9")
                     return p.id .. ":" .. type(p.set) .. ":" .. type(p.var) .. ":" .. type(p.capture)
                   end,
                 }
@@ -1871,10 +1906,10 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                castr.register_command{
+                tpane.register_command{
                   name = "running",
                   handler = function()
-                    local p = castr.panes()[1]
+                    local p = tpane.panes()[1]
                     return tostring(p:running("zsh")) .. ":" .. p:proc_tree():list()[1].argv .. ":" .. p.cwd_basename
                   end,
                 }
@@ -1883,7 +1918,7 @@ mod tests {
             .unwrap();
 
         let out = runtime.run_command("running", &[]).unwrap();
-        assert_eq!(out.as_deref(), Some("true:zsh:castr"));
+        assert_eq!(out.as_deref(), Some("true:zsh:tpane"));
     }
 
     #[test]
@@ -1894,10 +1929,10 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                castr.register_command{
+                tpane.register_command{
                   name = "method_types",
                   handler = function()
-                    local p = castr.panes()[1]
+                    local p = tpane.panes()[1]
                     return type(p.set) .. ":" .. type(p.var) .. ":" .. type(p.capture)
                   end,
                 }
@@ -1917,9 +1952,9 @@ mod tests {
                 "test.lua",
                 r#"
                 seen = ""
-                castr.on("pane:new", function(p) seen = p.id end)
-                castr.on("pane:new", function() error("bad event") end)
-                castr.register_command{
+                tpane.on("pane:new", function(p) seen = p.id end)
+                tpane.on("pane:new", function() error("bad event") end)
+                tpane.register_command{
                   name = "seen",
                   handler = function() return seen end,
                 }
@@ -1942,8 +1977,8 @@ mod tests {
                 "test.lua",
                 r#"
                 seen = ""
-                castr.on("window:close", function(window) seen = window end)
-                castr.register_command{
+                tpane.on("window:close", function(window) seen = window end)
+                tpane.register_command{
                   name = "seen",
                   handler = function() return seen end,
                 }
@@ -1963,12 +1998,12 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                castr.register_kind{
+                tpane.register_kind{
                   name = "broken",
                   detect = function() error("bad detect") end,
                   label = function() return "broken" end,
                 }
-                castr.register_kind{
+                tpane.register_kind{
                   name = "ok",
                   detect = function() return true end,
                   label = function(p) return "ok · " .. p.cwd_basename end,
@@ -1989,9 +2024,9 @@ mod tests {
                     active: true,
                     zoomed: false,
                     tag: None,
-                    migrate_tag: false,
                     home: None,
                     state: None,
+                    migrate_legacy: false,
                 },
                 Vec::new(),
             )

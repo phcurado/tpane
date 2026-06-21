@@ -249,14 +249,20 @@ impl Daemon {
                 .proc_tree(pane.pid)
                 .unwrap_or_default();
             if let Some(detection) = self.lua.detect(&pane, proc_tree.clone())? {
-                tmux::set_pane_var(&pane.id, "@castr_kind", &detection.kind)?;
-                tmux::set_pane_var(&pane.id, "@castr_label", &detection.label)?;
+                tmux::set_pane_var(&pane.id, "@tpane_kind", &detection.kind)?;
+                tmux::set_pane_var(&pane.id, "@tpane_label", &detection.label)?;
                 if let Some(color) = &detection.color {
-                    tmux::set_pane_var(&pane.id, "@castr_color", color)?;
+                    tmux::set_pane_var(&pane.id, "@tpane_color", color)?;
                 }
-                if pane.migrate_tag {
+                if pane.migrate_legacy {
                     if let Some(tag) = &pane.tag {
-                        tmux::set_pane_var(&pane.id, "@castr_tag", tag)?;
+                        tmux::set_pane_var(&pane.id, "@tpane_tag", tag)?;
+                    }
+                    if let Some(home) = &pane.home {
+                        tmux::set_pane_var(&pane.id, "@tpane_home", home)?;
+                    }
+                    if let Some(state) = &pane.state {
+                        tmux::set_pane_var(&pane.id, "@tpane_state", state)?;
                     }
                 }
                 let state = detection
@@ -288,7 +294,7 @@ impl Daemon {
 
         let status = status_strip(&snapshots, !self.status_errors().is_empty());
         if status != self.status_strip {
-            tmux::set_global_var("@castr_status", &status)?;
+            tmux::set_global_var("@tpane_status", &status)?;
             self.status_strip = status;
         }
         self.update_events(&snapshots);
@@ -349,10 +355,10 @@ impl Daemon {
             .map(|error| error.lines().next().unwrap_or(error))
             .unwrap_or("Lua load error");
         let message = if self.load_errors.len() == 1 {
-            format!("castr: {first}")
+            format!("tpane: {first}")
         } else {
             format!(
-                "castr: {} load errors; run castr status",
+                "tpane: {} load errors; run tpane status",
                 self.load_errors.len()
             )
         };
@@ -394,7 +400,7 @@ impl Daemon {
                 value: value.clone(),
             },
         );
-        tmux::set_pane_var(pane_id, "@castr_state", &value)?;
+        tmux::set_pane_var(pane_id, "@tpane_state", &value)?;
         if changed {
             self.record_runtime_errors(self.lua.fire_event_text("state:change", pane_id));
         }
@@ -409,15 +415,15 @@ impl Daemon {
             return;
         }
         mark_record_seen(record);
-        let _ = tmux::set_pane_var(pane_id, "@castr_state", "idle_seen");
+        let _ = tmux::set_pane_var(pane_id, "@tpane_state", "idle_seen");
         self.record_runtime_errors(self.lua.fire_event_text("state:change", pane_id));
     }
 
     fn set_state(&mut self, pane_id: &str, state: &str) -> Result<()> {
         if state == "idle" || state == "idle_seen" {
-            tmux::unset_pane_var(pane_id, "@castr_push_state")?;
+            tmux::unset_pane_var(pane_id, "@tpane_push_state")?;
         } else {
-            tmux::set_pane_var(pane_id, "@castr_push_state", state)?;
+            tmux::set_pane_var(pane_id, "@tpane_push_state", state)?;
         }
         let active = self
             .panes
@@ -602,7 +608,7 @@ fn state_value(raw: &str, active: bool, previous: Option<&StateRecord>) -> Strin
 fn status_strip(panes: &[PaneSnapshot], has_errors: bool) -> String {
     let mut parts = Vec::new();
     if has_errors {
-        parts.push("#[fg=red]castr error#[default]".to_string());
+        parts.push("#[fg=red]tpane error#[default]".to_string());
     }
     parts.extend(
         panes
@@ -627,7 +633,7 @@ fn status_dot(state: Option<&str>) -> &'static str {
 }
 
 fn keybind_command(command: &[String], context: bool) -> String {
-    let mut parts = vec!["castr".to_string()];
+    let mut parts = vec!["tpane".to_string()];
     parts.extend(command.iter().cloned());
     if context {
         parts.push("#{pane_id}".to_string());
@@ -723,10 +729,10 @@ mod tests {
             r#"
             counts = { new = 0, focus = 0, tick = 0 }
             focused = ""
-            castr.on("pane:new", function(_) counts.new = counts.new + 1 end)
-            castr.on("pane:focus", function(p) counts.focus = counts.focus + 1; focused = p.id end)
-            castr.on("tick", function() counts.tick = counts.tick + 1 end)
-            castr.register_command{
+            tpane.on("pane:new", function(_) counts.new = counts.new + 1 end)
+            tpane.on("pane:focus", function(p) counts.focus = counts.focus + 1; focused = p.id end)
+            tpane.on("tick", function() counts.tick = counts.tick + 1 end)
+            tpane.register_command{
               name = "counts",
               handler = function()
                 return counts.new .. ":" .. counts.focus .. ":" .. counts.tick .. ":" .. focused
@@ -753,8 +759,8 @@ mod tests {
         let mut daemon = test_daemon(
             r#"
             closed = ""
-            castr.on("window:close", function(window) closed = window end)
-            castr.register_command{
+            tpane.on("window:close", function(window) closed = window end)
+            tpane.register_command{
               name = "closed",
               handler = function() return closed end,
             }
@@ -772,7 +778,7 @@ mod tests {
     fn event_errors_are_collected_without_crashing() {
         let mut daemon = test_daemon(
             r#"
-            castr.on("tick", function() error("tick failed") end)
+            tpane.on("tick", function() error("tick failed") end)
             "#,
         );
 
@@ -800,18 +806,18 @@ mod tests {
         agent.label = "pi".to_string();
         agent.state = Some("idle_seen".to_string());
         assert_eq!(status_strip(&[agent], false), "#[fg=green]●#[default] pi");
-        assert_eq!(status_strip(&[], true), "#[fg=red]castr error#[default]");
+        assert_eq!(status_strip(&[], true), "#[fg=red]tpane error#[default]");
     }
 
     #[test]
     fn keybind_command_injects_invoking_pane_context() {
         assert_eq!(
             keybind_command(&["pi".to_string(), "expand".to_string()], true),
-            "castr pi expand #{pane_id}"
+            "tpane pi expand #{pane_id}"
         );
         assert_eq!(
             keybind_command(&["control".to_string()], false),
-            "castr control"
+            "tpane control"
         );
     }
 

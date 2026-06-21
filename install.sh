@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
-# install.sh — download the latest castr release binary into ~/.local/bin.
+# install.sh — download the latest tpane release binary into ~/.local/bin.
 set -eu
 
-REPO="phcurado/castr"
+REPO="phcurado/tpane"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -34,7 +34,7 @@ case "$tag" in
   *) tag="v$tag" ;;
 esac
 
-asset="castr_${tag#v}_${os}_${arch}.tar.gz"
+asset="tpane_${tag#v}_${os}_${arch}.tar.gz"
 url="https://github.com/$REPO/releases/download/$tag/$asset"
 
 echo "downloading $url"
@@ -57,9 +57,9 @@ fi
 tar -xzf "$TMP/$asset" -C "$TMP"
 
 mkdir -p "$BIN_DIR"
-install -m 0755 "$TMP/castr" "$BIN_DIR/castr"
+install -m 0755 "$TMP/tpane" "$BIN_DIR/tpane"
 
-echo "installed: $BIN_DIR/castr ($tag)"
+echo "installed: $BIN_DIR/tpane ($tag)"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) echo "note: $BIN_DIR is not in PATH" >&2 ;;
