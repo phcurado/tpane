@@ -9,7 +9,6 @@ pub enum Request {
     Refresh,
     Reload,
     Status,
-    Pick,
     Panes,
     Panels,
     SelectPane { id: String },

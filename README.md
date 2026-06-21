@@ -1,21 +1,39 @@
 # tpane
 
-tpane is a small tmux daemon configured with Lua.
-
-It runs next to a tmux server, labels panes by what is running in them, and lets
-you describe pane workflows in Lua instead of shell scripts and `tmux.conf` glue.
+Configure and extend tmux with Lua.
 
 ## Example
 
-Say you want a logs pane below the current pane. You want one key to show or hide
-it without killing the shell inside it, and another key to expand it.
+Configure your statusbar in Lua:
+
+```lua
+tpane.widget("project", function(ctx)
+  return ctx.pane and ctx.pane.cwd_basename or ""
+end)
+
+tpane.statusline {
+  left = { "session", "project" },
+  right = { "clock" },
+}
+```
+
+Set tmux options with Lua tables when you want styling:
+
+```lua
+tpane.options {
+  status = { style = { bg = "default" } },
+  pane = { border = { style = { fg = "#51576d" } } },
+}
+```
+
+Or add keybinds and work with complex flows. Say you want a logs pane below the current pane. You want one key to show or hide it without killing the shell inside it, and another key to expand it.
 
 ```lua
 -- ~/.config/tpane/init.lua
 tpane.register_pane("logs", {
   dir = "below",
   size = "25%",
-  command = "zsh",
+  command = "tail -f logs/app.log",
 })
 
 tpane.bind_key("root", "M-e", function(pane)
@@ -27,8 +45,8 @@ tpane.bind_key("root", "M-E", function(pane)
 end)
 ```
 
-`M-e` shows or hides the logs pane below the current pane. It uses 25% of the
-window. When hidden, the pane is stashed, so the process inside keeps running.
+`M-e` shows or hides a pane running `tail -f logs/app.log` below the current pane.
+When hidden, the pane is stashed, so the process inside keeps running.
 
 `M-E` expands the logs pane. Press it again to return to the normal layout.
 
@@ -52,24 +70,12 @@ Start it from `tmux.conf`:
 run-shell -b 'tpane'
 ```
 
-Optional status segment:
-
-```tmux
-set -g status-right '#{@tpane_status}'
-```
-
 ## Config
 
-tpane loads every Lua file under:
+tpane loads top-level Lua files and plugin entrypoints under:
 
 ```text
 ~/.config/tpane
-```
-
-A basic kind looks like this:
-
-```lua
-tpane.kind { name = "psql", match = "psql" }
 ```
 
 Full Lua reference: [`docs/lua-api.md`](docs/lua-api.md).
@@ -85,3 +91,11 @@ tpane doctor   # inspect hidden panes/sessions
 ```
 
 Run `tpane --help` for everything else.
+
+## Plugins
+
+```sh
+tpane plugin add https://github.com/example/tpane-plugin.git
+tpane plugin list
+tpane plugin remove tpane-plugin
+```

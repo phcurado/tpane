@@ -15,7 +15,6 @@ pub struct PaneInfo {
     pub tag: Option<String>,
     pub home: Option<String>,
     pub state: Option<String>,
-    pub migrate_legacy: bool,
 }
 
 pub fn start_server() -> Result<()> {
@@ -59,12 +58,7 @@ pub fn new_session(name: &str) -> Result<()> {
 
 pub fn install_render_options() -> Result<()> {
     tmux(&["set-option", "-g", "pane-border-status", "top"])?;
-    tmux(&[
-        "set-option",
-        "-g",
-        "pane-border-format",
-        "#{?#{==:#{@tpane_state},blocked},#[fg=red]● #[default],#{?#{==:#{@tpane_state},working},#[fg=yellow]● #[default],#{?#{==:#{@tpane_state},done_unseen},#[fg=blue]● #[default],#{?#{==:#{@tpane_state},idle_seen},#[fg=green]● #[default],}}}}#{?@tpane_label,#[fg=yellow]#{@tpane_label}#[default],#{pane_current_command}}",
-    ])?;
+    tmux(&["set-option", "-g", "pane-border-format", "#{@tpane_border}"])?;
     Ok(())
 }
 
@@ -73,7 +67,7 @@ pub fn list_panes() -> Result<Vec<PaneInfo>> {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{session_name}\t#{window_id}\t#{pane_active}\t#{window_zoomed_flag}\t#{@tpane_tag}\t#{@castr_tag}\t#{@castr_role}\t#{@tpane_home}\t#{@castr_home}\t#{@tpane_state}\t#{@castr_state}",
+        "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{pane_current_command}\t#{session_name}\t#{window_id}\t#{pane_active}\t#{window_zoomed_flag}\t#{@tpane_tag}\t#{@tpane_home}\t#{@tpane_state}",
     ])?;
 
     output
@@ -84,7 +78,7 @@ pub fn list_panes() -> Result<Vec<PaneInfo>> {
 }
 
 fn parse_pane_info(line: &str) -> Result<PaneInfo> {
-    let mut parts = line.splitn(15, '\t');
+    let mut parts = line.splitn(11, '\t');
     let id = parts
         .next()
         .ok_or_else(|| anyhow!("missing pane id in tmux output"))?
@@ -100,19 +94,9 @@ fn parse_pane_info(line: &str) -> Result<PaneInfo> {
     let window = parts.next().unwrap_or_default().to_string();
     let active = parts.next() == Some("1");
     let zoomed = parts.next() == Some("1");
-    let tpane_tag = nonempty(parts.next().unwrap_or_default());
-    let castr_tag = nonempty(parts.next().unwrap_or_default());
-    let castr_role = nonempty(parts.next().unwrap_or_default());
-    let tpane_home = nonempty(parts.next().unwrap_or_default());
-    let castr_home = nonempty(parts.next().unwrap_or_default());
-    let tpane_state = nonempty(parts.next().unwrap_or_default());
-    let castr_state = nonempty(parts.next().unwrap_or_default());
-    let migrate_legacy = tpane_tag.is_none() && (castr_tag.is_some() || castr_role.is_some())
-        || tpane_home.is_none() && castr_home.is_some()
-        || tpane_state.is_none() && castr_state.is_some();
-    let tag = tpane_tag.or(castr_tag).or(castr_role);
-    let home = tpane_home.or(castr_home);
-    let state = tpane_state.or(castr_state);
+    let tag = nonempty(parts.next().unwrap_or_default());
+    let home = nonempty(parts.next().unwrap_or_default());
+    let state = nonempty(parts.next().unwrap_or_default());
     Ok(PaneInfo {
         id,
         pid,
@@ -125,7 +109,6 @@ fn parse_pane_info(line: &str) -> Result<PaneInfo> {
         tag,
         home,
         state,
-        migrate_legacy,
     })
 }
 
@@ -230,6 +213,45 @@ fn bind_key_args(mode: &str, key: &str, command: &str, popup: bool) -> Vec<Strin
 
 pub fn set_global_var(name: &str, value: &str) -> Result<()> {
     tmux(&["set-option", "-g", name, value]).map(|_| ())
+}
+
+pub fn set_status(slot: &str, value: &str) -> Result<()> {
+    tmux_owned(set_status_args(slot, value)).map(|_| ())
+}
+
+fn set_status_args(slot: &str, value: &str) -> Vec<String> {
+    vec![
+        "set-option".to_string(),
+        "-g".to_string(),
+        format!("status-{slot}"),
+        value.to_string(),
+    ]
+}
+
+pub fn set_status_position(position: &str) -> Result<()> {
+    tmux_owned(set_status_position_args(position)).map(|_| ())
+}
+
+fn set_status_position_args(position: &str) -> Vec<String> {
+    vec![
+        "set-option".to_string(),
+        "-g".to_string(),
+        "status-position".to_string(),
+        position.to_string(),
+    ]
+}
+
+pub fn set_status_interval(interval: u64) -> Result<()> {
+    tmux_owned(set_status_interval_args(interval)).map(|_| ())
+}
+
+fn set_status_interval_args(interval: u64) -> Vec<String> {
+    vec![
+        "set-option".to_string(),
+        "-g".to_string(),
+        "status-interval".to_string(),
+        interval.to_string(),
+    ]
 }
 
 pub fn set_pane_var(pane_id: &str, name: &str, value: &str) -> Result<()> {
@@ -408,9 +430,10 @@ pub fn unstash(opts: UnstashOptions) -> Result<()> {
 }
 
 pub fn cleanup_stash(window: &str) -> Result<()> {
-    let session = hidden_session(window);
-    if has_session(&session) {
-        kill_session(&session)?;
+    for session in [hidden_session(window), legacy_hidden_session(window)] {
+        if has_session(&session) {
+            kill_session(&session)?;
+        }
     }
     Ok(())
 }
@@ -420,6 +443,10 @@ pub fn kill_session(session: &str) -> Result<()> {
 }
 
 pub fn hidden_session(window: &str) -> String {
+    format!("__tpane-hidden-{window}")
+}
+
+fn legacy_hidden_session(window: &str) -> String {
     format!("__pi-hidden-{window}")
 }
 
@@ -560,8 +587,7 @@ mod tests {
     #[test]
     fn parse_pane_info_reads_window_id_tag_and_home() {
         let pane =
-            parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t1\t0\tagent\t\t\t@7\t\tblocked\t")
-                .unwrap();
+            parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t1\t0\tagent\t@7\tblocked").unwrap();
         assert_eq!(pane.id, "%1");
         assert_eq!(pane.pid, 42);
         assert_eq!(pane.command, "zsh");
@@ -569,31 +595,18 @@ mod tests {
         assert!(pane.active);
         assert!(!pane.zoomed);
         assert_eq!(pane.tag.as_deref(), Some("agent"));
-        assert!(!pane.migrate_legacy);
         assert_eq!(pane.home.as_deref(), Some("@7"));
         assert_eq!(pane.state.as_deref(), Some("blocked"));
     }
 
     #[test]
     fn parse_pane_info_treats_empty_tag_and_home_as_none() {
-        let pane = parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t0\t1\t\t\t\t\t\t\t").unwrap();
+        let pane = parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t0\t1\t\t\t").unwrap();
         assert!(!pane.active);
         assert!(pane.zoomed);
         assert_eq!(pane.tag, None);
-        assert!(!pane.migrate_legacy);
         assert_eq!(pane.home, None);
         assert_eq!(pane.state, None);
-    }
-
-    #[test]
-    fn parse_pane_info_migrates_old_role_to_tag() {
-        let pane =
-            parse_pane_info("%1\t42\t/tmp/work\tzsh\tmain\t@7\t0\t0\t\t\tagent\t\t@7\t\tblocked")
-                .unwrap();
-        assert_eq!(pane.tag.as_deref(), Some("agent"));
-        assert!(pane.migrate_legacy);
-        assert_eq!(pane.home.as_deref(), Some("@7"));
-        assert_eq!(pane.state.as_deref(), Some("blocked"));
     }
 
     #[test]
@@ -631,6 +644,22 @@ mod tests {
                 "80%",
                 "tpane control"
             ]
+        );
+    }
+
+    #[test]
+    fn status_args_are_built_without_running_tmux() {
+        assert_eq!(
+            set_status_args("right", "#{session_name}"),
+            vec!["set-option", "-g", "status-right", "#{session_name}"]
+        );
+        assert_eq!(
+            set_status_position_args("top"),
+            vec!["set-option", "-g", "status-position", "top"]
+        );
+        assert_eq!(
+            set_status_interval_args(1),
+            vec!["set-option", "-g", "status-interval", "1"]
         );
     }
 
@@ -748,14 +777,15 @@ mod tests {
 
     #[test]
     fn stash_arg_builders_are_pure() {
-        assert_eq!(hidden_session("@7"), "__pi-hidden-@7");
+        assert_eq!(hidden_session("@7"), "__tpane-hidden-@7");
+        assert_eq!(legacy_hidden_session("@7"), "__pi-hidden-@7");
         assert_eq!(
-            new_hidden_session_args("__pi-hidden-@7", "/tmp/work"),
+            new_hidden_session_args("__tpane-hidden-@7", "/tmp/work"),
             vec![
                 "new-session",
                 "-d",
                 "-s",
-                "__pi-hidden-@7",
+                "__tpane-hidden-@7",
                 "-n",
                 "scratch",
                 "-c",
@@ -763,21 +793,21 @@ mod tests {
             ]
         );
         assert_eq!(
-            stash_break_args("%2", "__pi-hidden-@7", "agent-sidebar"),
+            stash_break_args("%2", "__tpane-hidden-@7", "agent-sidebar"),
             vec![
                 "break-pane",
                 "-d",
                 "-s",
                 "%2",
                 "-t",
-                "__pi-hidden-@7:",
+                "__tpane-hidden-@7:",
                 "-n",
                 "agent-sidebar"
             ]
         );
         assert_eq!(
-            kill_hidden_scratch_args("__pi-hidden-@7"),
-            vec!["kill-window", "-t", "__pi-hidden-@7:scratch"]
+            kill_hidden_scratch_args("__tpane-hidden-@7"),
+            vec!["kill-window", "-t", "__tpane-hidden-@7:scratch"]
         );
     }
 }

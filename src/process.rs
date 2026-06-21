@@ -11,38 +11,51 @@ pub struct ProcessInfo {
     pub argv: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ProcessTable {
+    by_pid: HashMap<i32, ProcessInfo>,
+    children: HashMap<i32, Vec<i32>>,
+}
+
+impl ProcessTable {
+    fn from_map(by_pid: HashMap<i32, ProcessInfo>) -> Self {
+        let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+        for process in by_pid.values() {
+            children.entry(process.ppid).or_default().push(process.pid);
+        }
+        Self { by_pid, children }
+    }
+
+    pub fn tree(&self, root_pid: i32) -> Vec<ProcessInfo> {
+        let mut tree = Vec::new();
+        let mut stack = vec![root_pid];
+        while let Some(pid) = stack.pop() {
+            if let Some(process) = self.by_pid.get(&pid) {
+                tree.push(process.clone());
+                if let Some(child_pids) = self.children.get(&pid) {
+                    stack.extend(child_pids.iter().copied());
+                }
+            }
+        }
+        tree
+    }
+}
+
 pub trait ProcessProvider {
-    fn proc_tree(&self, root_pid: i32) -> Result<Vec<ProcessInfo>>;
+    fn snapshot(&self) -> Result<ProcessTable>;
 }
 
 pub struct SystemProcessProvider;
 
 impl ProcessProvider for SystemProcessProvider {
-    fn proc_tree(&self, root_pid: i32) -> Result<Vec<ProcessInfo>> {
-        proc_tree(root_pid)
+    fn snapshot(&self) -> Result<ProcessTable> {
+        snapshot()
     }
 }
 
 #[cfg(target_os = "linux")]
-fn proc_tree(root_pid: i32) -> Result<Vec<ProcessInfo>> {
-    let processes = read_linux_processes()?;
-    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
-    for process in processes.values() {
-        children.entry(process.ppid).or_default().push(process.pid);
-    }
-
-    let mut tree = Vec::new();
-    let mut stack = vec![root_pid];
-    while let Some(pid) = stack.pop() {
-        if let Some(process) = processes.get(&pid) {
-            tree.push(process.clone());
-            if let Some(child_pids) = children.get(&pid) {
-                stack.extend(child_pids.iter().copied());
-            }
-        }
-    }
-
-    Ok(tree)
+fn snapshot() -> Result<ProcessTable> {
+    Ok(ProcessTable::from_map(read_linux_processes()?))
 }
 
 #[cfg(target_os = "linux")]
@@ -105,7 +118,7 @@ fn decode_cmdline(bytes: &[u8]) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn proc_tree(root_pid: i32) -> Result<Vec<ProcessInfo>> {
+fn snapshot() -> Result<ProcessTable> {
     let output = std::process::Command::new("ps")
         .args(["-axo", "pid=,ppid=,command="])
         .output()
@@ -117,23 +130,9 @@ fn proc_tree(root_pid: i32) -> Result<Vec<ProcessInfo>> {
         );
     }
 
-    let processes = parse_ps_processes(&String::from_utf8_lossy(&output.stdout));
-    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
-    for process in processes.values() {
-        children.entry(process.ppid).or_default().push(process.pid);
-    }
-
-    let mut tree = Vec::new();
-    let mut stack = vec![root_pid];
-    while let Some(pid) = stack.pop() {
-        if let Some(process) = processes.get(&pid) {
-            tree.push(process.clone());
-            if let Some(child_pids) = children.get(&pid) {
-                stack.extend(child_pids.iter().copied());
-            }
-        }
-    }
-    Ok(tree)
+    Ok(ProcessTable::from_map(parse_ps_processes(
+        &String::from_utf8_lossy(&output.stdout),
+    )))
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -154,7 +153,7 @@ fn parse_ps_processes(output: &str) -> HashMap<i32, ProcessInfo> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn proc_tree(_root_pid: i32) -> Result<Vec<ProcessInfo>> {
+fn snapshot() -> Result<ProcessTable> {
     anyhow::bail!("ProcessProvider is only implemented for Linux/macOS in this slice")
 }
 
@@ -172,5 +171,20 @@ mod tests {
         assert_eq!(processes.get(&11).unwrap().ppid, 10);
         assert_eq!(processes.get(&11).unwrap().argv, "pi --project /tmp/tpane");
         assert!(!processes.contains_key(&0));
+    }
+
+    #[test]
+    fn process_table_tree_walks_descendants_from_shared_snapshot() {
+        let table = ProcessTable::from_map(parse_ps_processes(
+            "10 1 /bin/zsh\n11 10 pi --project x\n12 11 node\n20 1 other\n",
+        ));
+        let mut pids = table
+            .tree(10)
+            .into_iter()
+            .map(|process| process.pid)
+            .collect::<Vec<_>>();
+        pids.sort();
+        assert_eq!(pids, [10, 11, 12]);
+        assert!(table.tree(20).iter().all(|process| process.pid != 11));
     }
 }

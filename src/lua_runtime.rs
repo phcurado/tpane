@@ -9,9 +9,11 @@ use anyhow::{Result, anyhow};
 use mlua::{
     Function, Lua, ObjectLike, RegistryKey, Table, UserData, UserDataFields, UserDataMethods, Value,
 };
+use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
 use crate::process::ProcessInfo;
 use crate::protocol::{PaneSnapshot, PanelCard, PanelView};
+use crate::store::Store;
 use crate::tmux::{self, PaneInfo};
 
 pub struct LuaRuntime {
@@ -21,7 +23,13 @@ pub struct LuaRuntime {
     events: Rc<RefCell<HashMap<String, Vec<RegistryKey>>>>,
     keybinds: Rc<RefCell<Vec<Keybind>>>,
     panels: Rc<RefCell<Vec<Panel>>>,
+    widgets: Rc<RefCell<HashMap<String, RegistryKey>>>,
+    pane_border: Rc<RefCell<Option<RegistryKey>>>,
+    states: Rc<RefCell<HashMap<String, StatePresentation>>>,
+    statusline: Rc<RefCell<Option<StatusLineDef>>>,
+    options: Rc<RefCell<Vec<(String, String)>>>,
     panes: Rc<RefCell<Vec<PaneSnapshot>>>,
+    store: Rc<RefCell<Store>>,
 }
 
 struct Kind {
@@ -30,6 +38,7 @@ struct Kind {
     label: RegistryKey,
     state: Option<RegistryKey>,
     color: Option<String>,
+    tag: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,12 +56,36 @@ struct Panel {
     cards: RegistryKey,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StatePresentation {
+    pub color: Option<String>,
+    pub glyph: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusLineDef {
+    position: Option<String>,
+    interval: Option<u64>,
+    left: Option<Vec<String>>,
+    right: Option<Vec<String>>,
+    separator: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StatusRender {
+    pub position: Option<String>,
+    pub interval: Option<u64>,
+    pub left: Option<String>,
+    pub right: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Detection {
     pub kind: String,
     pub label: String,
     pub raw_state: Option<String>,
     pub color: Option<String>,
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,13 +111,26 @@ struct LuaPane {
 struct LuaProcTree(Vec<ProcessInfo>);
 
 impl LuaRuntime {
+    #[cfg(test)]
     pub fn new(panes: Rc<RefCell<Vec<PaneSnapshot>>>) -> Result<Self> {
+        Self::with_store(panes, Rc::new(RefCell::new(Store::memory())))
+    }
+
+    pub fn with_store(
+        panes: Rc<RefCell<Vec<PaneSnapshot>>>,
+        store: Rc<RefCell<Store>>,
+    ) -> Result<Self> {
         let lua = Lua::new();
         let kinds = Rc::new(RefCell::new(Vec::new()));
         let commands = Rc::new(RefCell::new(HashMap::new()));
         let events = Rc::new(RefCell::new(HashMap::new()));
         let keybinds = Rc::new(RefCell::new(Vec::new()));
         let panels = Rc::new(RefCell::new(Vec::new()));
+        let widgets = Rc::new(RefCell::new(HashMap::new()));
+        let pane_border = Rc::new(RefCell::new(None));
+        let states = Rc::new(RefCell::new(HashMap::new()));
+        let statusline = Rc::new(RefCell::new(None));
+        let options = Rc::new(RefCell::new(Vec::new()));
         let runtime = Self {
             lua,
             kinds,
@@ -92,7 +138,13 @@ impl LuaRuntime {
             events,
             keybinds,
             panels,
+            widgets,
+            pane_border,
+            states,
+            statusline,
+            options,
             panes,
+            store,
         };
         runtime.install_api()?;
         runtime.load_prelude()?;
@@ -147,6 +199,7 @@ impl LuaRuntime {
                     label,
                     raw_state,
                     color: kind.color.clone(),
+                    tag: kind.tag.clone(),
                 }));
             }
         }
@@ -196,12 +249,14 @@ impl LuaRuntime {
                     .map(|state| lua.create_registry_value(state))
                     .transpose()?;
                 let color = table.get::<Option<String>>("color")?;
+                let tag = table.get::<Option<String>>("tag")?;
                 kinds.borrow_mut().push(Kind {
                     name,
                     detect,
                     label,
                     state,
                     color,
+                    tag,
                 });
                 Ok(())
             })
@@ -210,6 +265,37 @@ impl LuaRuntime {
             .set("register_kind", register_kind.clone())
             .map_err(lua_err)?;
         tpane.set("kind", register_kind).map_err(lua_err)?;
+
+        let states = Rc::clone(&self.states);
+        let state = self
+            .lua
+            .create_function(move |lua, args: mlua::MultiValue| {
+                let values = args.into_iter().collect::<Vec<_>>();
+                match values.as_slice() {
+                    [Value::String(name)] => {
+                        let name = name.to_string_lossy();
+                        match states.borrow().get(&name) {
+                            Some(presentation) => state_presentation_table(lua, presentation),
+                            None => Ok(Value::Nil),
+                        }
+                    }
+                    [Value::String(name), Value::Table(table)] => {
+                        let name = name.to_string_lossy();
+                        let presentation = StatePresentation {
+                            color: table.get("color")?,
+                            glyph: table.get("glyph")?,
+                        };
+                        states.borrow_mut().insert(name, presentation);
+                        Ok(Value::Nil)
+                    }
+                    _ => Err(mlua::Error::RuntimeError(
+                        "expected tpane.state(name) or tpane.state(name, { color=..., glyph=... })"
+                            .to_string(),
+                    )),
+                }
+            })
+            .map_err(lua_err)?;
+        tpane.set("state", state).map_err(lua_err)?;
 
         let commands = Rc::clone(&self.commands);
         let register_command = self
@@ -288,6 +374,49 @@ impl LuaRuntime {
             .set("register_panel", register_panel)
             .map_err(lua_err)?;
 
+        let widgets = Rc::clone(&self.widgets);
+        let widget = self
+            .lua
+            .create_function(move |lua, (name, handler): (String, Function)| {
+                widgets
+                    .borrow_mut()
+                    .insert(name, lua.create_registry_value(handler)?);
+                Ok(())
+            })
+            .map_err(lua_err)?;
+        tpane.set("widget", widget).map_err(lua_err)?;
+
+        let pane_border = Rc::clone(&self.pane_border);
+        let pane_border_fn = self
+            .lua
+            .create_function(move |lua, handler: Function| {
+                *pane_border.borrow_mut() = Some(lua.create_registry_value(handler)?);
+                Ok(())
+            })
+            .map_err(lua_err)?;
+        tpane.set("pane_border", pane_border_fn).map_err(lua_err)?;
+
+        let statusline = Rc::clone(&self.statusline);
+        let set_statusline = self
+            .lua
+            .create_function(move |_, table: Table| {
+                let def = parse_statusline_def(table)?;
+                *statusline.borrow_mut() = Some(def);
+                Ok(())
+            })
+            .map_err(lua_err)?;
+        tpane.set("statusline", set_statusline).map_err(lua_err)?;
+
+        let options = Rc::clone(&self.options);
+        let set_options = self
+            .lua
+            .create_function(move |_, table: Table| {
+                *options.borrow_mut() = flatten_options(table)?;
+                Ok(())
+            })
+            .map_err(lua_err)?;
+        tpane.set("options", set_options).map_err(lua_err)?;
+
         let panes = Rc::clone(&self.panes);
         let panes_fn = self
             .lua
@@ -301,6 +430,10 @@ impl LuaRuntime {
             .map_err(lua_err)?;
         tpane.set("pane", pane_fn).map_err(lua_err)?;
 
+        tpane
+            .set("store", store_api(&self.lua, Rc::clone(&self.store))?)
+            .map_err(lua_err)?;
+        install_package_path(&self.lua)?;
         tpane.set("tmux", tmux_api(&self.lua)?).map_err(lua_err)?;
         tpane
             .set("with_pane", with_pane_fn(&self.lua)?)
@@ -360,6 +493,145 @@ impl LuaRuntime {
                 })
             })
             .collect()
+    }
+
+    pub fn status_options(&self) -> StatusRender {
+        self.statusline
+            .borrow()
+            .as_ref()
+            .map(|def| StatusRender {
+                position: def.position.clone(),
+                interval: def.interval,
+                left: None,
+                right: None,
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn options(&self) -> Vec<(String, String)> {
+        let mut options = self.options.borrow().clone();
+        options.sort_by(|a, b| a.0.cmp(&b.0));
+        options
+    }
+
+    pub fn state_presentation(&self, state: &str) -> Option<StatePresentation> {
+        self.states.borrow().get(state).cloned()
+    }
+
+    pub fn render_pane_border(&self, pane: &PaneSnapshot) -> Result<Option<String>> {
+        let handler: Function = {
+            let pane_border = self.pane_border.borrow();
+            let Some(handler_key) = pane_border.as_ref() else {
+                return Ok(None);
+            };
+            self.lua.registry_value(handler_key).map_err(lua_err)?
+        };
+        let pane = snapshot_table(&self.lua, pane).map_err(lua_err)?;
+        let value = handler.call::<Value>(pane).map_err(lua_err)?;
+        render_widget_value(value).map_err(lua_err)
+    }
+
+    pub fn render_statusline(&self, current_pane_id: Option<&str>) -> (StatusRender, Vec<String>) {
+        let Some(def) = self.statusline.borrow().clone() else {
+            return (StatusRender::default(), Vec::new());
+        };
+
+        let mut errors = Vec::new();
+        let ctx = match self.status_context(current_pane_id) {
+            Ok(ctx) => Some(ctx),
+            Err(error) => {
+                errors.push(format!("status context: {error}"));
+                None
+            }
+        };
+        let left = def.left.as_ref().map(|widgets| {
+            self.render_status_slot(widgets, &def.separator, ctx.clone(), &mut errors)
+        });
+        let right = def
+            .right
+            .as_ref()
+            .map(|widgets| self.render_status_slot(widgets, &def.separator, ctx, &mut errors));
+
+        (
+            StatusRender {
+                position: def.position,
+                interval: def.interval,
+                left,
+                right,
+            },
+            errors,
+        )
+    }
+
+    fn render_status_slot(
+        &self,
+        names: &[String],
+        separator: &str,
+        ctx: Option<Table>,
+        errors: &mut Vec<String>,
+    ) -> String {
+        names
+            .iter()
+            .filter_map(|name| self.render_widget(name, ctx.clone(), errors))
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(separator)
+    }
+
+    fn status_context(&self, current_pane_id: Option<&str>) -> mlua::Result<Table> {
+        let panes = self.panes.borrow();
+        let current = current_pane_id
+            .and_then(|id| panes.iter().find(|pane| pane.id == id))
+            .or_else(|| panes.first());
+        let ctx = self.lua.create_table()?;
+        ctx.set("panes", snapshots_table(&self.lua, &panes)?)?;
+        if let Some(pane) = current {
+            ctx.set("pane", snapshot_table(&self.lua, pane)?)?;
+            ctx.set("session", pane.session.clone())?;
+            ctx.set("window", pane.window.clone())?;
+        } else {
+            ctx.set("pane", Value::Nil)?;
+            ctx.set("session", Value::Nil)?;
+            ctx.set("window", Value::Nil)?;
+        }
+        Ok(ctx)
+    }
+
+    fn render_widget(
+        &self,
+        name: &str,
+        ctx: Option<Table>,
+        errors: &mut Vec<String>,
+    ) -> Option<String> {
+        let handler = {
+            let widgets = self.widgets.borrow();
+            let Some(handler_key) = widgets.get(name) else {
+                errors.push(format!("status widget {name}: unknown widget"));
+                return None;
+            };
+            match self.lua.registry_value::<Function>(handler_key) {
+                Ok(handler) => handler,
+                Err(error) => {
+                    errors.push(format!("status widget {name}: {error}"));
+                    return None;
+                }
+            }
+        };
+
+        let arg = ctx.map(Value::Table).unwrap_or(Value::Nil);
+        match handler.call::<Value>(arg) {
+            Ok(value) => match render_widget_value(value) {
+                Ok(value) => value,
+                Err(error) => {
+                    errors.push(format!("status widget {name}: {error}"));
+                    None
+                }
+            },
+            Err(error) => {
+                errors.push(format!("status widget {name}: {error}"));
+                None
+            }
+        }
     }
 
     pub fn run_command(&self, name: &str, args: &[String]) -> Result<Option<String>> {
@@ -430,25 +702,18 @@ impl LuaRuntime {
 
 pub fn user_plugin_files() -> Vec<PathBuf> {
     let config = config_dir();
-    ensure_starter_config(&config);
     let mut files = Vec::new();
     collect_lua_files(&config, &mut files);
     files.sort();
     files
 }
 
-fn ensure_starter_config(config: &Path) {
-    let mut existing = Vec::new();
-    collect_lua_files(config, &mut existing);
-    if !existing.is_empty() {
-        return;
-    }
-    if fs::create_dir_all(config).is_err() {
-        return;
-    }
-    for (name, source) in STARTER_FILES {
-        let _ = fs::write(config.join(name), source);
-    }
+pub fn config_lua_files() -> Vec<PathBuf> {
+    let config = config_dir();
+    let mut files = Vec::new();
+    collect_lua_files_recursive(&config, &mut files);
+    files.sort();
+    files
 }
 
 fn collect_lua_files(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -458,12 +723,208 @@ fn collect_lua_files(dir: &Path, files: &mut Vec<PathBuf>) {
 
     for entry in entries.filter_map(std::result::Result::ok) {
         let path = entry.path();
+        if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("lua") {
+            files.push(path);
+        }
+    }
+
+    let plugins = dir.join("plugins");
+    let Ok(entries) = fs::read_dir(plugins) else {
+        return;
+    };
+    for entry in entries.filter_map(std::result::Result::ok) {
+        let init = entry.path().join("init.lua");
+        if init.is_file() {
+            files.push(init);
+        }
+    }
+}
+
+fn collect_lua_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.filter_map(std::result::Result::ok) {
+        let path = entry.path();
         if path.is_dir() {
-            collect_lua_files(&path, files);
+            collect_lua_files_recursive(&path, files);
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("lua") {
             files.push(path);
         }
     }
+}
+
+fn parse_statusline_def(table: Table) -> mlua::Result<StatusLineDef> {
+    let position = table.get::<Option<String>>("position")?;
+    if let Some(position) = &position
+        && !matches!(position.as_str(), "top" | "bottom")
+    {
+        return Err(mlua::Error::RuntimeError(format!(
+            "statusline position must be top or bottom, got {position}"
+        )));
+    }
+    Ok(StatusLineDef {
+        position,
+        interval: table.get("interval")?,
+        left: parse_status_slot(table.get("left")?)?,
+        right: parse_status_slot(table.get("right")?)?,
+        separator: table
+            .get::<Option<String>>("separator")?
+            .unwrap_or_else(|| "  ".to_string()),
+    })
+}
+
+fn parse_status_slot(value: Value) -> mlua::Result<Option<Vec<String>>> {
+    match value {
+        Value::Nil => Ok(None),
+        Value::Table(table) => table
+            .sequence_values::<String>()
+            .collect::<mlua::Result<Vec<_>>>()
+            .map(Some),
+        other => Err(mlua::Error::RuntimeError(format!(
+            "statusline slot must be a list of widget names, got {other:?}"
+        ))),
+    }
+}
+
+fn flatten_options(table: Table) -> mlua::Result<Vec<(String, String)>> {
+    let mut options = Vec::new();
+    flatten_option_table(&table, &[], &mut options)?;
+    options.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(options)
+}
+
+fn flatten_option_table(
+    table: &Table,
+    path: &[String],
+    options: &mut Vec<(String, String)>,
+) -> mlua::Result<()> {
+    for pair in table.clone().pairs::<String, Value>() {
+        let (key, value) = pair?;
+        if !path.is_empty() && key.contains('-') {
+            return Err(mlua::Error::RuntimeError(format!(
+                "literal tmux option names are only supported at top level: {key}"
+            )));
+        }
+        let segment = if path.is_empty() && key.contains('-') {
+            key
+        } else {
+            key.replace('_', "-")
+        };
+        let mut next_path = path.to_vec();
+        next_path.push(segment);
+        let name = next_path.join("-");
+        match value {
+            Value::String(value) => options.push((name, value.to_string_lossy())),
+            Value::Integer(value) => options.push((name, value.to_string())),
+            Value::Number(value) => options.push((name, value.to_string())),
+            Value::Boolean(value) => options.push((name, value.to_string())),
+            Value::Table(table) if name.ends_with("-style") => {
+                options.push((name, style_spec(&table)?));
+            }
+            Value::Table(table) if name.ends_with("-format") => {
+                options.push((name, render_widget_table(table)?.unwrap_or_default()));
+            }
+            Value::Table(table) => flatten_option_table(&table, &next_path, options)?,
+            other => {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "unsupported option value for {name}: {other:?}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_widget_value(value: Value) -> mlua::Result<Option<String>> {
+    match value {
+        Value::Nil => Ok(None),
+        Value::String(value) => Ok(Some(value.to_string_lossy())),
+        Value::Table(table) => render_widget_table(table),
+        other => Err(mlua::Error::RuntimeError(format!(
+            "expected string, table, or nil; got {other:?}"
+        ))),
+    }
+}
+
+fn render_widget_table(table: Table) -> mlua::Result<Option<String>> {
+    if table.get::<Option<Value>>(1)?.is_some() {
+        let mut out = String::new();
+        for value in table.sequence_values::<Value>() {
+            if let Some(value) = render_widget_value(value?)? {
+                out.push_str(&value);
+            }
+        }
+        return Ok(Some(out));
+    }
+
+    let text = table.get::<Option<String>>("text")?.unwrap_or_default();
+    let attrs = style_attrs(&table)?;
+
+    if attrs.is_empty() {
+        Ok(Some(text))
+    } else {
+        Ok(Some(format!("#[{}]{}#[default]", attrs.join(","), text)))
+    }
+}
+
+fn style_spec(table: &Table) -> mlua::Result<String> {
+    Ok(style_attrs(table)?.join(","))
+}
+
+fn style_attrs(table: &Table) -> mlua::Result<Vec<String>> {
+    for key in table
+        .clone()
+        .pairs::<String, Value>()
+        .map(|pair| pair.map(|(key, _)| key))
+    {
+        match key?.as_str() {
+            "text" | "fg" | "bg" | "bold" | "dim" | "italics" | "blink" | "reverse" | "hidden"
+            | "strikethrough" | "underscore" | "align" | "fill" => {}
+            other => {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "unknown status style: {other}"
+                )));
+            }
+        }
+    }
+
+    let mut attrs = Vec::new();
+    for key in ["fg", "bg"] {
+        if let Some(value) = table.get::<Option<String>>(key)? {
+            attrs.push(format!("{key}={value}"));
+        }
+    }
+    for key in [
+        "bold",
+        "dim",
+        "italics",
+        "blink",
+        "reverse",
+        "hidden",
+        "strikethrough",
+    ] {
+        if table.get::<Option<bool>>(key)?.unwrap_or(false) {
+            attrs.push(key.to_string());
+        }
+    }
+    match table.get::<Value>("underscore")? {
+        Value::Boolean(true) => attrs.push("underscore".to_string()),
+        Value::Boolean(false) | Value::Nil => {}
+        Value::String(style) => attrs.push(format!("underscore={}", style.to_string_lossy())),
+        other => {
+            return Err(mlua::Error::RuntimeError(format!(
+                "status style underscore must be a boolean or string, got {other:?}"
+            )));
+        }
+    }
+    for key in ["align", "fill"] {
+        if let Some(value) = table.get::<Option<String>>(key)? {
+            attrs.push(format!("{key}={value}"));
+        }
+    }
+    Ok(attrs)
 }
 
 fn parse_panel_cards(cards: Table) -> mlua::Result<Vec<PanelCard>> {
@@ -737,6 +1198,171 @@ fn set_pane_fields(pane_id: &str, table: Table) -> mlua::Result<()> {
         tmux::set_pane_title(pane_id, &title).map_err(mlua_external)?;
     }
     Ok(())
+}
+
+fn state_presentation_table(lua: &Lua, presentation: &StatePresentation) -> mlua::Result<Value> {
+    let table = lua.create_table()?;
+    table.set("color", presentation.color.clone())?;
+    table.set("glyph", presentation.glyph.clone())?;
+    Ok(Value::Table(table))
+}
+
+fn install_package_path(lua: &Lua) -> Result<()> {
+    install_package_path_for(lua, &config_dir())
+}
+
+fn install_package_path_for(lua: &Lua, config_dir: &Path) -> Result<()> {
+    let package: Table = lua.globals().get("package").map_err(lua_err)?;
+    let current = package.get::<String>("path").unwrap_or_default();
+    let config = config_dir.display().to_string();
+    let paths = [
+        format!("{config}/?.lua"),
+        format!("{config}/?/init.lua"),
+        format!("{config}/plugins/?.lua"),
+        format!("{config}/plugins/?/init.lua"),
+    ]
+    .join(";");
+    let next = if current.is_empty() {
+        paths
+    } else {
+        format!("{paths};{current}")
+    };
+    package.set("path", next).map_err(lua_err)
+}
+
+fn store_api(lua: &Lua, store: Rc<RefCell<Store>>) -> Result<Table> {
+    let table = lua.create_table().map_err(lua_err)?;
+
+    let get_store = Rc::clone(&store);
+    table
+        .set(
+            "get",
+            lua.create_function(move |lua, key: String| {
+                get_store
+                    .borrow()
+                    .get(&key)
+                    .map(|value| json_to_lua(lua, &value))
+                    .unwrap_or(Ok(Value::Nil))
+            })
+            .map_err(lua_err)?,
+        )
+        .map_err(lua_err)?;
+
+    let set_store = Rc::clone(&store);
+    table
+        .set(
+            "set",
+            lua.create_function(move |_, (key, value): (String, Value)| {
+                let value = lua_to_json(value)?;
+                set_store.borrow_mut().set(key, value);
+                Ok(())
+            })
+            .map_err(lua_err)?,
+        )
+        .map_err(lua_err)?;
+
+    table
+        .set(
+            "delete",
+            lua.create_function(move |_, key: String| {
+                store.borrow_mut().delete(&key);
+                Ok(())
+            })
+            .map_err(lua_err)?,
+        )
+        .map_err(lua_err)?;
+
+    Ok(table)
+}
+
+fn json_to_lua(lua: &Lua, value: &JsonValue) -> mlua::Result<Value> {
+    Ok(match value {
+        JsonValue::Null => Value::Nil,
+        JsonValue::Bool(value) => Value::Boolean(*value),
+        JsonValue::Number(value) => {
+            if let Some(integer) = value.as_i64() {
+                Value::Integer(integer)
+            } else if let Some(number) = value.as_f64() {
+                Value::Number(number)
+            } else {
+                Value::Nil
+            }
+        }
+        JsonValue::String(value) => Value::String(lua.create_string(value)?),
+        JsonValue::Array(values) => {
+            let table = lua.create_table()?;
+            for (idx, value) in values.iter().enumerate() {
+                table.set(idx + 1, json_to_lua(lua, value)?)?;
+            }
+            Value::Table(table)
+        }
+        JsonValue::Object(values) => {
+            let table = lua.create_table()?;
+            for (key, value) in values {
+                table.set(key.as_str(), json_to_lua(lua, value)?)?;
+            }
+            Value::Table(table)
+        }
+    })
+}
+
+fn lua_to_json(value: Value) -> mlua::Result<JsonValue> {
+    match value {
+        Value::Nil => Ok(JsonValue::Null),
+        Value::Boolean(value) => Ok(JsonValue::Bool(value)),
+        Value::Integer(value) => Ok(JsonValue::Number(JsonNumber::from(value))),
+        Value::Number(value) => JsonNumber::from_f64(value)
+            .map(JsonValue::Number)
+            .ok_or_else(|| mlua::Error::RuntimeError("cannot store non-finite number".to_string())),
+        Value::String(value) => Ok(JsonValue::String(value.to_string_lossy())),
+        Value::Table(table) => lua_table_to_json(table),
+        other => Err(mlua::Error::RuntimeError(format!(
+            "cannot store Lua value: {other:?}"
+        ))),
+    }
+}
+
+fn lua_table_to_json(table: Table) -> mlua::Result<JsonValue> {
+    let mut array_values: Vec<(usize, JsonValue)> = Vec::new();
+    let mut object = JsonMap::new();
+    let mut array_like = true;
+
+    for pair in table.pairs::<Value, Value>() {
+        let (key, value) = pair?;
+        let value = lua_to_json(value)?;
+        match key {
+            Value::Integer(index) if index > 0 => {
+                array_values.push((index as usize, value));
+            }
+            Value::String(key) => {
+                array_like = false;
+                object.insert(key.to_string_lossy(), value);
+            }
+            other => {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "cannot store table key: {other:?}"
+                )));
+            }
+        }
+    }
+
+    if array_like {
+        array_values.sort_by_key(|(idx, _)| *idx);
+        if array_values
+            .iter()
+            .enumerate()
+            .all(|(offset, (idx, _))| *idx == offset + 1)
+        {
+            return Ok(JsonValue::Array(
+                array_values.into_iter().map(|(_, value)| value).collect(),
+            ));
+        }
+    }
+
+    for (idx, value) in array_values {
+        object.insert(idx.to_string(), value);
+    }
+    Ok(JsonValue::Object(object))
 }
 
 fn tmux_api(lua: &Lua) -> Result<Table> {
@@ -1026,10 +1652,10 @@ impl PaneGuard {
 impl Drop for PaneGuard {
     fn drop(&mut self) {
         let _ = tmux::select_pane(&self.pane_id);
-        if let Ok(current_zoomed) = tmux::is_zoomed(&self.pane_id) {
-            if current_zoomed != self.zoomed_before {
-                let _ = tmux::zoom(&self.pane_id);
-            }
+        if let Ok(current_zoomed) = tmux::is_zoomed(&self.pane_id)
+            && current_zoomed != self.zoomed_before
+        {
+            let _ = tmux::zoom(&self.pane_id);
         }
         let _ = tmux::select_pane(&self.active_before);
     }
@@ -1148,257 +1774,9 @@ fn basename(path: &str) -> String {
         .to_string()
 }
 
-const PRELUDE: &str = r#"
-tpane._pane_defs = {}
+const PRELUDE: &str = include_str!("lua/prelude.lua");
 
-function tpane.register_pane(name, opts)
-  opts.tag = opts.tag or name
-  opts.name = opts.name or name
-  tpane._pane_defs[name] = opts
-  return opts
-end
-
-local function pane_opts(opts)
-  if type(opts) == "string" then return tpane._pane_defs[opts] end
-  return opts
-end
-
-function tpane.find(query)
-  for _, pane in ipairs(tpane.panes()) do
-    local ok = true
-    for key, expected in pairs(query) do
-      if pane[key] ~= expected then
-        ok = false
-        break
-      end
-    end
-    if ok then return pane end
-  end
-end
-
-function tpane.find_all(query)
-  local found = {}
-  for _, pane in ipairs(tpane.panes()) do
-    local ok = true
-    for key, expected in pairs(query) do
-      if pane[key] ~= expected then
-        ok = false
-        break
-      end
-    end
-    if ok then found[#found + 1] = pane end
-  end
-  return found
-end
-
-function tpane.resolve(target)
-  if type(target) == "string" then return target end
-  if target and target.id then return target.id end
-  local pane = tpane.find(target)
-  return pane and pane.id
-end
-
-function tpane.split(pane, opts)
-  local id = tpane.tmux.split {
-    target = tpane.resolve(pane),
-    dir = opts.dir or opts.direction,
-    size = opts.size,
-    cwd = opts.cwd,
-    command = opts.command,
-    detached = opts.detached,
-  }
-  local created = tpane.pane(id)
-  if opts.tag then created:set { tag = opts.tag } end
-  return created
-end
-
-local function companion_query(from, opts)
-  return { tag = opts.tag, window = from.window, home = from.window }
-end
-
-local function companion_horizontal(opts)
-  return opts.dir == "right" or opts.dir == "left" or opts.dir == "h" or opts.dir == "horizontal"
-end
-
-local function show_companion(from, opts)
-  local visible = tpane.find(companion_query(from, opts))
-  if visible then return visible end
-
-  local hidden = tpane.find { session = "__pi-hidden-" .. from.window, tag = opts.tag, home = from.window }
-  if hidden then
-    tpane.tmux.unstash {
-      pane = hidden.id,
-      target = from.id,
-      horizontal = companion_horizontal(opts),
-      size = opts.size,
-    }
-    tpane.tmux.select(hidden.id)
-    return hidden
-  end
-
-  local pane = tpane.split(from, {
-    dir = opts.dir,
-    size = opts.size,
-    cwd = from.cwd,
-    command = opts.command,
-    detached = true,
-    tag = opts.tag,
-  })
-  pane:set { home = from.window, title = opts.title, label = opts.label }
-  tpane.tmux.select(pane.id)
-  return pane
-end
-
-local raw_toggle = function(target)
-  local id = tpane.resolve(target)
-  if not id then return false end
-  tpane.tmux.zoom(id)
-  return true
-end
-
-function tpane.toggle(target, opts)
-  if not opts then return raw_toggle(target) end
-  opts = pane_opts(opts)
-  if not opts then return false end
-
-  local visible = tpane.find(companion_query(target, opts))
-  if not visible then
-    show_companion(target, opts)
-    return true
-  end
-
-  if visible.state == "blocked" and opts.blocked_message then
-    tpane.tmux.display { target = visible.id, message = opts.blocked_message }
-    return false
-  end
-
-  tpane.tmux.stash {
-    pane = visible.id,
-    window = target.window,
-    cwd = target.cwd,
-    name = opts.name or opts.tag,
-  }
-  return true
-end
-
-function tpane.expand(target, opts)
-  if opts then
-    opts = pane_opts(opts)
-    if not opts then return false end
-    target = show_companion(target, opts)
-  end
-
-  local id = tpane.resolve(target)
-  if not id then return false end
-
-  local window = tpane.tmux.window_id(id)
-  if tpane.tmux.is_zoomed(window) and tpane.tmux.active_pane(window) == id then
-    tpane.tmux.unzoom(window)
-    return true
-  end
-
-  tpane.tmux.unzoom(window)
-  tpane.tmux.select(id)
-  tpane.tmux.zoom(id)
-  return true
-end
-"#;
-
-const STARTER_FILES: &[(&str, &str)] = &[
-    (
-        "10-psql.lua",
-        r#"tpane.kind { name = "psql", match = "psql" }
-"#,
-    ),
-    (
-        "20-hello.lua",
-        r#"tpane.command {
-  name = "hello",
-  handler = function()
-    return "hi"
-  end,
-}
-"#,
-    ),
-    (
-        "30-panel.lua",
-        r#"tpane.panel {
-  id = "panes",
-  title = "Panes",
-  cards = function()
-    local cards = {}
-    for _, p in ipairs(tpane.panes()) do
-      cards[#cards + 1] = {
-        title = p.label,
-        subtitle = p.window,
-        state = p.state,
-        tag = p.tag or p.kind,
-        pane = p.id,
-      }
-    end
-    return cards
-  end,
-}
-"#,
-    ),
-];
-
-const BUILTIN_KINDS: &str = r#"
-local function agent_state(p)
-  local pushed = p:var("@tpane_push_state")
-  if pushed == "blocked" then return "blocked" end
-  local out = p:capture()
-  if out:match("esc to interrupt") or out:match("[Ww]orking through it") then return "working" end
-  return "idle"
-end
-
-tpane.kind {
-  name = "pi",
-  detect = function(p)
-    return p:running("pi-coding-agent")
-        or p:running("@earendil-works/pi")
-        or p:running("pi")
-  end,
-  label = function(_p)
-    return "pi"
-  end,
-  color = "yellow",
-  state = agent_state,
-}
-
-tpane.kind { name = "nvim", match = "nvim" }
-
-tpane.kind {
-  name = "claude",
-  match = "claude",
-  label = function(_p)
-    return "claude"
-  end,
-  color = "yellow",
-  state = agent_state,
-}
-
-tpane.kind {
-  name = "copilot",
-  match = "copilot",
-  label = function(_p)
-    return "copilot"
-  end,
-  color = "yellow",
-  state = agent_state,
-}
-
-tpane.kind {
-  name = "pane",
-  detect = function(_p)
-    return true
-  end,
-  label = function(p)
-    if p.tag == "terminal" then return "bottom" end
-    return p.command
-  end,
-}
-"#;
+const BUILTIN_KINDS: &str = include_str!("lua/builtin_kinds.lua");
 
 #[cfg(test)]
 mod tests {
@@ -1434,39 +1812,25 @@ mod tests {
     }
 
     #[test]
-    fn ensure_starter_config_writes_files_only_when_empty() {
-        let root = std::env::temp_dir().join(format!("tpane-starter-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        ensure_starter_config(&root);
-        let mut files = Vec::new();
-        collect_lua_files(&root, &mut files);
-        assert_eq!(files.len(), STARTER_FILES.len());
-
-        std::fs::write(root.join("custom.lua"), "-- custom").unwrap();
-        ensure_starter_config(&root);
-        let mut files = Vec::new();
-        collect_lua_files(&root, &mut files);
-        assert_eq!(files.len(), STARTER_FILES.len() + 1);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn collect_lua_files_recurses_under_config_dir() {
+    fn collect_lua_files_loads_top_level_and_plugin_inits() {
         let root = std::env::temp_dir().join(format!("tpane-lua-files-{}", std::process::id()));
-        let nested = root.join("anywhere/deeper");
+        let nested = root.join("lib");
+        let plugin = root.join("plugins/foo");
         std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&plugin).unwrap();
         std::fs::write(root.join("a.lua"), "").unwrap();
-        std::fs::write(nested.join("b.lua"), "").unwrap();
-        std::fs::write(nested.join("ignore.txt"), "").unwrap();
+        std::fs::write(nested.join("helper.lua"), "").unwrap();
+        std::fs::write(plugin.join("init.lua"), "").unwrap();
+        std::fs::write(plugin.join("lib.lua"), "").unwrap();
 
         let mut files = Vec::new();
         collect_lua_files(&root, &mut files);
         files.sort();
-        let names = files
+        let rel = files
             .iter()
-            .map(|path| path.file_name().unwrap().to_str().unwrap().to_string())
+            .map(|path| path.strip_prefix(&root).unwrap().display().to_string())
             .collect::<Vec<_>>();
-        assert_eq!(names, ["a.lua", "b.lua"]);
+        assert_eq!(rel, ["a.lua", "plugins/foo/init.lua"]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1579,6 +1943,85 @@ mod tests {
     }
 
     #[test]
+    fn lua_require_uses_config_dir_package_path() {
+        let root = std::env::temp_dir().join(format!("tpane-require-{}", std::process::id()));
+        let lib = root.join("lib");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("helper.lua"), "return { value = 'ok' }").unwrap();
+
+        let panes = Rc::new(RefCell::new(Vec::new()));
+        let runtime = LuaRuntime::new(panes).unwrap();
+        install_package_path_for(&runtime.lua, &root).unwrap();
+
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                local helper = require("lib.helper")
+                tpane.command("check", function() return helper.value end)
+                "#,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.run_command("check", &[]).unwrap().as_deref(),
+            Some("ok")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn store_api_round_trips_lua_values() {
+        let panes = Rc::new(RefCell::new(Vec::new()));
+        let store = Rc::new(RefCell::new(Store::memory()));
+        let runtime = LuaRuntime::with_store(panes, store).unwrap();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.command("write", function()
+                  tpane.store.set("prefs", { count = 2, items = { "a", "b" } })
+                end)
+                tpane.command("read", function()
+                  local prefs = tpane.store.get("prefs")
+                  return prefs.count .. ":" .. prefs.items[2]
+                end)
+                "#,
+            )
+            .unwrap();
+
+        runtime.run_command("write", &[]).unwrap();
+        assert_eq!(
+            runtime.run_command("read", &[]).unwrap().as_deref(),
+            Some("2:b")
+        );
+    }
+
+    #[test]
+    fn workspace_registers_declarative_layout() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.workspace { name = "dev", windows = { { name = "app" }, { name = "logs" } } }
+                tpane.command("workspace_count", function()
+                  return tostring(#tpane._workspaces.dev.windows)
+                end)
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime
+                .run_command("workspace_count", &[])
+                .unwrap()
+                .as_deref(),
+            Some("2")
+        );
+    }
+
+    #[test]
     fn find_and_find_all_match_query_fields() {
         let (runtime, panes) = runtime();
         panes.borrow_mut().push(pane("%1"));
@@ -1670,6 +2113,227 @@ mod tests {
         assert_eq!(panels.len(), 1);
         assert_eq!(panels[0].id, "workspace");
         assert_eq!(panels[0].cards[0].pane.as_deref(), Some("%1"));
+    }
+
+    #[test]
+    fn style_builder_emits_spec_and_format_forms() {
+        let (runtime, _) = runtime();
+        let table = runtime.lua.create_table().unwrap();
+        table.set("text", "x").unwrap();
+        table.set("fg", "red").unwrap();
+        table.set("bold", true).unwrap();
+
+        assert_eq!(style_spec(&table).unwrap(), "fg=red,bold");
+        assert_eq!(
+            render_widget_table(table).unwrap().as_deref(),
+            Some("#[fg=red,bold]x#[default]")
+        );
+    }
+
+    #[test]
+    fn nested_options_flatten_and_serialize_styles() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r##"
+                tpane.options{
+                  status = { left_length = 120 },
+                  pane = { border = { lines = "heavy", style = { fg = "#51576d" } } },
+                  ["pane-active-border-style"] = { fg = "#8caaee" },
+                  window = { status = { current_format = { text = "#I", fg = "#8caaee", bold = true } } },
+                }
+                "##,
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime.options(),
+            vec![
+                (
+                    "pane-active-border-style".to_string(),
+                    "fg=#8caaee".to_string()
+                ),
+                ("pane-border-lines".to_string(), "heavy".to_string()),
+                ("pane-border-style".to_string(), "fg=#51576d".to_string()),
+                ("status-left-length".to_string(), "120".to_string()),
+                (
+                    "window-status-current-format".to_string(),
+                    "#[fg=#8caaee,bold]#I#[default]".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn fmt_helpers_return_tmux_conditionals() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r##"
+                tpane.command("fmt", function()
+                  return tpane.fmt.prefix("ON", "off") .. ";" .. tpane.fmt.when("window_zoomed_flag", "Z", "")
+                end)
+                "##,
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime.run_command("fmt", &[]).unwrap().as_deref(),
+            Some("#{?client_prefix,ON,off};#{?window_zoomed_flag,Z,}")
+        );
+    }
+
+    #[test]
+    fn state_registry_registers_and_reads_presentations() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.state("approval", { color = "magenta", glyph = "?" })
+                tpane.command("state", function()
+                  return tpane.state("approval").color .. tpane.state("approval").glyph .. ";" .. tpane.state("idle_seen").color
+                end)
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime.run_command("state", &[]).unwrap().as_deref(),
+            Some("magenta?;green")
+        );
+    }
+
+    #[test]
+    fn pane_border_renders_from_lua_and_state_registry() {
+        let (runtime, _) = runtime();
+        let mut pane = pane("%1");
+        pane.state = Some("working".to_string());
+        pane.label = "build".to_string();
+
+        let border = runtime.render_pane_border(&pane).unwrap().unwrap();
+        assert_eq!(
+            border,
+            "#[fg=yellow]● #[default]#[fg=yellow]build#[default]"
+        );
+    }
+
+    #[test]
+    fn companions_widget_uses_state_registry() {
+        let (runtime, panes) = runtime();
+        let mut companion = pane("%1");
+        companion.home = Some("@1".to_string());
+        companion.label = "logs".to_string();
+        companion.state = Some("approval".to_string());
+        panes.borrow_mut().push(companion);
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.state("approval", { color = "magenta", glyph = "?" })
+                tpane.statusline { right = { "companions" } }
+                "#,
+            )
+            .unwrap();
+
+        let (status, errors) = runtime.render_statusline(Some("%1"));
+        assert!(errors.is_empty());
+        assert_eq!(
+            status.right.as_deref(),
+            Some("#[fg=magenta]?#[default] logs")
+        );
+    }
+
+    #[test]
+    fn statusline_context_uses_current_pane_id() {
+        let (runtime, panes) = runtime();
+        let mut other = pane("%1");
+        other.session = "other".to_string();
+        other.window = "@1".to_string();
+        other.active = true;
+        panes.borrow_mut().push(other);
+        let mut current = pane("%2");
+        current.session = "current".to_string();
+        current.window = "@2".to_string();
+        current.active = true;
+        panes.borrow_mut().push(current);
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.widget("s", function(ctx) return "[" .. ctx.session .. "]" end)
+                tpane.statusline { left = { "s" } }
+                "#,
+            )
+            .unwrap();
+
+        let (status, errors) = runtime.render_statusline(Some("%2"));
+        assert!(errors.is_empty());
+        assert_eq!(status.left.as_deref(), Some("[current]"));
+    }
+
+    #[test]
+    fn statusline_renders_raw_and_styled_widgets() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r##"
+                tpane.widget("raw", function() return "#{session_name}" end)
+                tpane.widget("styled", function() return { text = "x", fg = "red", bold = true } end)
+                tpane.statusline { position = "top", interval = 1, left = { "raw" }, right = { "styled" }, separator = " | " }
+                "##,
+            )
+            .unwrap();
+
+        let (status, errors) = runtime.render_statusline(None);
+        assert!(errors.is_empty());
+        assert_eq!(status.position.as_deref(), Some("top"));
+        assert_eq!(status.interval, Some(1));
+        assert_eq!(status.left.as_deref(), Some("#{session_name}"));
+        assert_eq!(status.right.as_deref(), Some("#[fg=red,bold]x#[default]"));
+    }
+
+    #[test]
+    fn statusline_skips_failing_widgets_and_reports_errors() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.widget("bad", function() error("boom") end)
+                tpane.widget("ok", function() return "ok" end)
+                tpane.statusline { right = { "bad", "missing", "ok" } }
+                "#,
+            )
+            .unwrap();
+
+        let (status, errors) = runtime.render_statusline(None);
+        assert_eq!(status.right.as_deref(), Some("ok"));
+        assert_eq!(errors.len(), 2);
+        assert!(errors.iter().any(|error| error.contains("boom")));
+        assert!(errors.iter().any(|error| error.contains("unknown widget")));
+    }
+
+    #[test]
+    fn statusline_rejects_unknown_style_keys() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.widget("bad", function() return { text = "x", nope = true } end)
+                tpane.statusline { right = { "bad" } }
+                "#,
+            )
+            .unwrap();
+
+        let (status, errors) = runtime.render_statusline(None);
+        assert_eq!(status.right.as_deref(), Some(""));
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("unknown status style: nope"));
     }
 
     #[test]
@@ -1791,7 +2455,6 @@ mod tests {
                     tag: None,
                     home: None,
                     state: None,
-                    migrate_legacy: false,
                 },
                 vec![ProcessInfo {
                     pid: 1,
@@ -2026,7 +2689,6 @@ mod tests {
                     tag: None,
                     home: None,
                     state: None,
-                    migrate_legacy: false,
                 },
                 Vec::new(),
             )

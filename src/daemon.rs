@@ -1,6 +1,8 @@
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -10,9 +12,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 
-use crate::lua_runtime::{LuaRuntime, user_plugin_files};
+use crate::lua_runtime::{LuaRuntime, StatePresentation, config_lua_files, user_plugin_files};
 use crate::process::{ProcessProvider, SystemProcessProvider};
 use crate::protocol::{PaneSnapshot, Request, Response};
+use crate::store::Store;
 use crate::tmux;
 
 const MAX_RUNTIME_ERRORS: usize = 50;
@@ -76,6 +79,7 @@ pub fn run(socket: PathBuf) -> Result<()> {
 struct Daemon {
     lua: LuaRuntime,
     process_provider: SystemProcessProvider,
+    store: Rc<RefCell<Store>>,
     panes: Rc<RefCell<Vec<PaneSnapshot>>>,
     prev_pane_ids: HashSet<String>,
     prev_windows: HashSet<String>,
@@ -85,15 +89,23 @@ struct Daemon {
     runtime_errors: Vec<String>,
     states: HashMap<String, StateRecord>,
     status_strip: String,
+    status_left: String,
+    status_right: String,
+    status_position: Option<String>,
+    status_interval: Option<u64>,
+    options: HashMap<String, String>,
+    pane_borders: HashMap<String, String>,
     config_sig: Vec<(PathBuf, SystemTime)>,
 }
 
 impl Daemon {
     fn new() -> Result<Self> {
         let panes = Rc::new(RefCell::new(Vec::new()));
+        let store = Rc::new(RefCell::new(Store::load(store_path())));
         let mut daemon = Self {
-            lua: LuaRuntime::new(Rc::clone(&panes))?,
+            lua: LuaRuntime::with_store(Rc::clone(&panes), Rc::clone(&store))?,
             process_provider: SystemProcessProvider,
+            store,
             panes,
             prev_pane_ids: HashSet::new(),
             prev_windows: HashSet::new(),
@@ -103,6 +115,12 @@ impl Daemon {
             runtime_errors: Vec::new(),
             states: HashMap::new(),
             status_strip: String::new(),
+            status_left: String::new(),
+            status_right: String::new(),
+            status_position: None,
+            status_interval: None,
+            options: HashMap::new(),
+            pane_borders: HashMap::new(),
             config_sig: config_signature(),
         };
         daemon.reload_plugins()?;
@@ -132,7 +150,7 @@ impl Daemon {
                     Response::ok(Some(errors.join("\n")))
                 }
             }
-            Request::Pick | Request::Panes => match self.panes_data() {
+            Request::Panes => match self.panes_data() {
                 Ok(data) => Response::ok(Some(data)),
                 Err(error) => Response::error(error),
             },
@@ -169,7 +187,7 @@ impl Daemon {
     }
 
     fn reload_plugins(&mut self) -> Result<()> {
-        let rt = match LuaRuntime::new(Rc::clone(&self.panes)) {
+        let rt = match LuaRuntime::with_store(Rc::clone(&self.panes), Rc::clone(&self.store)) {
             Ok(rt) => rt,
             Err(error) => {
                 self.load_errors = vec![format!("prelude.lua: {error}")];
@@ -188,19 +206,19 @@ impl Daemon {
                     }
                     Err(error) => {
                         errors.push(format!("{name}: {error}"));
-                        if let Some(source) = self.last_good.get(&path) {
-                            if let Err(fallback_error) = rt.load_source(&name, source) {
-                                errors.push(format!("{name}: last-good failed: {fallback_error}"));
-                            }
+                        if let Some(source) = self.last_good.get(&path)
+                            && let Err(fallback_error) = rt.load_source(&name, source)
+                        {
+                            errors.push(format!("{name}: last-good failed: {fallback_error}"));
                         }
                     }
                 },
                 Err(error) => {
                     errors.push(format!("{name}: {error}"));
-                    if let Some(source) = self.last_good.get(&path) {
-                        if let Err(fallback_error) = rt.load_source(&name, source) {
-                            errors.push(format!("{name}: last-good failed: {fallback_error}"));
-                        }
+                    if let Some(source) = self.last_good.get(&path)
+                        && let Err(fallback_error) = rt.load_source(&name, source)
+                    {
+                        errors.push(format!("{name}: last-good failed: {fallback_error}"));
                     }
                 }
             }
@@ -224,6 +242,7 @@ impl Daemon {
         }
 
         self.lua = rt;
+        self.apply_status_options()?;
         self.load_errors = errors;
         self.runtime_errors.clear();
         if !self.load_errors.is_empty() {
@@ -243,27 +262,20 @@ impl Daemon {
         let count = panes.len();
         let mut snapshots = Vec::new();
 
+        let table = self.process_provider.snapshot().unwrap_or_default();
+
         for pane in panes {
-            let proc_tree = self
-                .process_provider
-                .proc_tree(pane.pid)
-                .unwrap_or_default();
+            let proc_tree = table.tree(pane.pid);
             if let Some(detection) = self.lua.detect(&pane, proc_tree.clone())? {
                 tmux::set_pane_var(&pane.id, "@tpane_kind", &detection.kind)?;
                 tmux::set_pane_var(&pane.id, "@tpane_label", &detection.label)?;
                 if let Some(color) = &detection.color {
                     tmux::set_pane_var(&pane.id, "@tpane_color", color)?;
                 }
-                if pane.migrate_legacy {
-                    if let Some(tag) = &pane.tag {
-                        tmux::set_pane_var(&pane.id, "@tpane_tag", tag)?;
-                    }
-                    if let Some(home) = &pane.home {
-                        tmux::set_pane_var(&pane.id, "@tpane_home", home)?;
-                    }
-                    if let Some(state) = &pane.state {
-                        tmux::set_pane_var(&pane.id, "@tpane_state", state)?;
-                    }
+                if pane.tag.is_none()
+                    && let Some(tag) = &detection.tag
+                {
+                    tmux::set_pane_var(&pane.id, "@tpane_tag", tag)?;
                 }
                 let state = detection
                     .raw_state
@@ -284,7 +296,7 @@ impl Daemon {
                     window: pane.window.clone(),
                     active: pane.active,
                     zoomed: pane.zoomed,
-                    tag: pane.tag.clone(),
+                    tag: pane.tag.clone().or(detection.tag.clone()),
                     home: pane.home.clone(),
                     state,
                     processes: proc_tree,
@@ -292,14 +304,91 @@ impl Daemon {
             }
         }
 
-        let status = status_strip(&snapshots, !self.status_errors().is_empty());
+        self.update_pane_borders(&snapshots)?;
+
+        let status = status_strip(&snapshots, !self.status_errors().is_empty(), |state| {
+            self.lua.state_presentation(state)
+        });
         if status != self.status_strip {
             tmux::set_global_var("@tpane_status", &status)?;
             self.status_strip = status;
         }
         self.update_events(&snapshots);
+        let current_pane_id = current_status_pane_id(&snapshots);
         *self.panes.borrow_mut() = snapshots;
+        self.update_statusline(current_pane_id.as_deref())?;
+        self.store.borrow_mut().flush()?;
         Ok(count)
+    }
+
+    fn update_pane_borders(&mut self, snapshots: &[PaneSnapshot]) -> Result<()> {
+        for pane in snapshots {
+            match self.lua.render_pane_border(pane) {
+                Ok(Some(border)) if self.pane_borders.get(&pane.id) != Some(&border) => {
+                    tmux::set_pane_var(&pane.id, "@tpane_border", &border)?;
+                    self.pane_borders.insert(pane.id.clone(), border);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    self.record_runtime_error(format!("pane border {}: {error}", pane.id));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_status_options(&mut self) -> Result<()> {
+        for (name, value) in self.lua.options() {
+            if self.options.get(&name) != Some(&value) {
+                tmux::set_global_var(&name, &value)?;
+                self.options.insert(name, value);
+            }
+        }
+
+        let status = self.lua.status_options();
+        if status.position != self.status_position {
+            if let Some(position) = &status.position {
+                tmux::set_status_position(position)?;
+            }
+            self.status_position = status.position;
+        }
+        if status.interval != self.status_interval {
+            if let Some(interval) = status.interval {
+                tmux::set_status_interval(interval)?;
+            }
+            self.status_interval = status.interval;
+        }
+        Ok(())
+    }
+
+    fn update_statusline(&mut self, current_pane_id: Option<&str>) -> Result<()> {
+        let (status, errors) = self.lua.render_statusline(current_pane_id);
+        self.record_runtime_errors(errors);
+        if status.position != self.status_position {
+            if let Some(position) = &status.position {
+                tmux::set_status_position(position)?;
+            }
+            self.status_position = status.position;
+        }
+        if status.interval != self.status_interval {
+            if let Some(interval) = status.interval {
+                tmux::set_status_interval(interval)?;
+            }
+            self.status_interval = status.interval;
+        }
+        if let Some(left) = status.left
+            && left != self.status_left
+        {
+            tmux::set_status("left", &left)?;
+            self.status_left = left;
+        }
+        if let Some(right) = status.right
+            && right != self.status_right
+        {
+            tmux::set_status("right", &right)?;
+            self.status_right = right;
+        }
+        Ok(())
     }
 
     fn update_events(&mut self, snapshots: &[PaneSnapshot]) {
@@ -321,12 +410,12 @@ impl Daemon {
             .iter()
             .find(|pane| pane.active)
             .map(|pane| pane.id.clone());
-        if active != self.prev_active {
-            if let Some(active_id) = &active {
-                self.mark_seen(active_id);
-                if let Some(pane) = snapshots.iter().find(|pane| &pane.id == active_id) {
-                    self.record_runtime_errors(self.lua.fire_event("pane:focus", Some(pane)));
-                }
+        if active != self.prev_active
+            && let Some(active_id) = &active
+        {
+            self.mark_seen(active_id);
+            if let Some(pane) = snapshots.iter().find(|pane| &pane.id == active_id) {
+                self.record_runtime_errors(self.lua.fire_event("pane:focus", Some(pane)));
             }
         }
 
@@ -433,7 +522,6 @@ impl Daemon {
             .map(|pane| pane.active)
             .unwrap_or(false);
         self.update_state(pane_id, state, active)?;
-        self.scan()?;
         Ok(())
     }
 
@@ -479,25 +567,16 @@ impl Daemon {
         let panes = self.panes.borrow().clone();
         let hidden_sessions = panes
             .iter()
-            .filter(|pane| pane.session.starts_with("__pi-hidden-"))
+            .filter(|pane| is_hidden_session(&pane.session))
             .map(|pane| pane.session.clone())
             .collect::<HashSet<_>>();
-        let agents = panes
-            .iter()
-            .filter(|pane| {
-                pane.tag.as_deref() == Some("agent")
-                    || matches!(pane.kind.as_str(), "pi" | "claude" | "copilot")
-            })
-            .count();
+        let agents = panes.iter().filter(|pane| is_agent(pane)).count();
         let mut issues = Vec::new();
         let mut cleaned = Vec::new();
         let mut seen: HashMap<(String, String, String), String> = HashMap::new();
 
-        for pane in panes
-            .iter()
-            .filter(|pane| pane.session.starts_with("__pi-hidden-"))
-        {
-            let expected_home = pane.session.trim_start_matches("__pi-hidden-");
+        for pane in panes.iter().filter(|pane| is_hidden_session(&pane.session)) {
+            let expected_home = hidden_session_home(&pane.session).unwrap_or_default();
             let tag = pane.tag.clone().unwrap_or_else(|| pane.kind.clone());
             let home = pane.home.clone().unwrap_or_default();
             if home != expected_home {
@@ -605,31 +684,72 @@ fn state_value(raw: &str, active: bool, previous: Option<&StateRecord>) -> Strin
     }
 }
 
-fn status_strip(panes: &[PaneSnapshot], has_errors: bool) -> String {
+fn status_strip(
+    panes: &[PaneSnapshot],
+    has_errors: bool,
+    presentation: impl Fn(&str) -> Option<StatePresentation>,
+) -> String {
     let mut parts = Vec::new();
     if has_errors {
         parts.push("#[fg=red]tpane error#[default]".to_string());
     }
-    parts.extend(
-        panes
-            .iter()
-            .filter(|pane| {
-                pane.tag.as_deref() == Some("agent")
-                    || matches!(pane.kind.as_str(), "pi" | "claude" | "copilot")
-            })
-            .map(|pane| format!("{} {}", status_dot(pane.state.as_deref()), pane.label)),
-    );
+    parts.extend(panes.iter().filter(|pane| is_agent(pane)).map(|pane| {
+        format!(
+            "{} {}",
+            status_dot(pane.state.as_deref(), &presentation),
+            pane.label
+        )
+    }));
     parts.join("  ")
 }
 
-fn status_dot(state: Option<&str>) -> &'static str {
-    match state {
-        Some("blocked") => "#[fg=red]●#[default]",
-        Some("working") => "#[fg=yellow]●#[default]",
-        Some("done_unseen") => "#[fg=blue]●#[default]",
-        Some("idle_seen") => "#[fg=green]●#[default]",
-        _ => "",
+fn is_agent(pane: &PaneSnapshot) -> bool {
+    pane.tag.as_deref() == Some("agent")
+}
+
+fn is_hidden_session(session: &str) -> bool {
+    hidden_session_home(session).is_some()
+}
+
+fn hidden_session_home(session: &str) -> Option<&str> {
+    session
+        .strip_prefix("__tpane-hidden-")
+        .or_else(|| session.strip_prefix("__pi-hidden-"))
+}
+
+fn status_dot(
+    state: Option<&str>,
+    presentation: &impl Fn(&str) -> Option<StatePresentation>,
+) -> String {
+    let Some(state) = state else {
+        return String::new();
+    };
+    let Some(presentation) = presentation(state) else {
+        return String::new();
+    };
+    let Some(color) = presentation.color else {
+        return String::new();
+    };
+    let glyph = presentation.glyph.unwrap_or_else(|| "●".to_string());
+    format!("#[fg={color}]{glyph}#[default]")
+}
+
+fn current_status_pane_id(snapshots: &[PaneSnapshot]) -> Option<String> {
+    if let Ok(current) = tmux::current_pane()
+        && snapshots.iter().any(|pane| pane.id == current)
+    {
+        return Some(current);
     }
+
+    if let Ok(window) = tmux::current_window()
+        && let Some(pane) = snapshots
+            .iter()
+            .find(|pane| pane.window == window && pane.active)
+    {
+        return Some(pane.id.clone());
+    }
+
+    snapshots.first().map(|pane| pane.id.clone())
 }
 
 fn keybind_command(command: &[String], context: bool) -> String {
@@ -641,8 +761,34 @@ fn keybind_command(command: &[String], context: bool) -> String {
     parts.join(" ")
 }
 
+fn store_path() -> PathBuf {
+    let root = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .or_else(|| std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| std::env::temp_dir().join("tpane-state"));
+    root.join("tpane")
+        .join(format!("tpane-{}.json", tmux_server_key()))
+}
+
+fn tmux_server_key() -> String {
+    let server = std::env::var("TMUX")
+        .ok()
+        .and_then(|value| value.split(',').next().map(str::to_string))
+        .unwrap_or_else(default_tmux_socket_path);
+    let mut hasher = DefaultHasher::new();
+    server.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn default_tmux_socket_path() -> String {
+    let tmp = std::env::var("TMUX_TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+    let uid = std::env::var("UID").unwrap_or_else(|_| "unknown".to_string());
+    format!("{tmp}/tmux-{uid}/default")
+}
+
 fn config_signature() -> Vec<(PathBuf, SystemTime)> {
-    user_plugin_files()
+    config_lua_files()
         .into_iter()
         .map(|path| {
             let modified = fs::metadata(&path)
@@ -705,11 +851,13 @@ mod tests {
 
     fn test_daemon(lua_source: &str) -> Daemon {
         let panes = Rc::new(RefCell::new(Vec::new()));
-        let lua = LuaRuntime::new(Rc::clone(&panes)).unwrap();
+        let store = Rc::new(RefCell::new(Store::memory()));
+        let lua = LuaRuntime::with_store(Rc::clone(&panes), Rc::clone(&store)).unwrap();
         lua.load_source("test.lua", lua_source).unwrap();
         Daemon {
             lua,
             process_provider: SystemProcessProvider,
+            store,
             panes,
             prev_pane_ids: HashSet::new(),
             prev_windows: HashSet::new(),
@@ -719,6 +867,12 @@ mod tests {
             runtime_errors: Vec::new(),
             states: HashMap::new(),
             status_strip: String::new(),
+            status_left: String::new(),
+            status_right: String::new(),
+            status_position: None,
+            status_interval: None,
+            options: HashMap::new(),
+            pane_borders: HashMap::new(),
             config_sig: Vec::new(),
         }
     }
@@ -799,14 +953,34 @@ mod tests {
 
     #[test]
     fn status_strip_shows_agent_states() {
-        assert_eq!(status_dot(Some("blocked")), "#[fg=red]●#[default]");
-        assert!(status_strip(&[pane("%1", true)], false).is_empty());
+        let presentation = |state: &str| match state {
+            "blocked" => Some(StatePresentation {
+                color: Some("red".to_string()),
+                glyph: Some("●".to_string()),
+            }),
+            "idle_seen" => Some(StatePresentation {
+                color: Some("green".to_string()),
+                glyph: Some("●".to_string()),
+            }),
+            _ => None,
+        };
+        assert_eq!(
+            status_dot(Some("blocked"), &presentation),
+            "#[fg=red]●#[default]"
+        );
+        assert!(status_strip(&[pane("%1", true)], false, presentation).is_empty());
         let mut agent = pane("%2", false);
         agent.tag = Some("agent".to_string());
         agent.label = "pi".to_string();
         agent.state = Some("idle_seen".to_string());
-        assert_eq!(status_strip(&[agent], false), "#[fg=green]●#[default] pi");
-        assert_eq!(status_strip(&[], true), "#[fg=red]tpane error#[default]");
+        assert_eq!(
+            status_strip(&[agent], false, presentation),
+            "#[fg=green]●#[default] pi"
+        );
+        assert_eq!(
+            status_strip(&[], true, presentation),
+            "#[fg=red]tpane error#[default]"
+        );
     }
 
     #[test]

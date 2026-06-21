@@ -1,7 +1,9 @@
 mod daemon;
 mod lua_runtime;
+mod plugins;
 mod process;
 mod protocol;
+mod store;
 mod tmux;
 
 use std::collections::hash_map::DefaultHasher;
@@ -62,6 +64,12 @@ enum Commands {
         clean: bool,
     },
 
+    /// Manage Lua plugins.
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
+
     /// Show or act on live tpane pane state.
     Control {
         #[arg(long)]
@@ -70,11 +78,22 @@ enum Commands {
         id: Option<String>,
     },
 
-    /// Placeholder for a future detailed control view.
-    Pick,
-
     #[command(external_subcommand)]
     External(Vec<String>),
+}
+
+#[derive(Debug, Subcommand)]
+enum PluginCommand {
+    /// Clone a git plugin into the config plugin directory.
+    Add {
+        url: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List installed plugins.
+    List,
+    /// Remove an installed plugin.
+    Remove { name: String },
 }
 
 fn main() -> Result<()> {
@@ -105,11 +124,8 @@ fn main() -> Result<()> {
             let response = request(Request::Doctor { clean })?;
             print_response(response)
         }
+        Some(Commands::Plugin { command }) => plugin(command),
         Some(Commands::Control { once, action, id }) => control(once, action, id),
-        Some(Commands::Pick) => {
-            let response = request(Request::Pick)?;
-            print_response(response)
-        }
         Some(Commands::External(parts)) => run_external(parts),
         None => launch(),
     }
@@ -117,14 +133,14 @@ fn main() -> Result<()> {
 
 fn launch() -> Result<()> {
     if env::var_os("TMUX").is_some() {
-        ensure_daemon()?;
         tmux::install_render_options()?;
+        ensure_daemon()?;
         return Ok(());
     }
 
     tmux::start_server()?;
-    ensure_daemon()?;
     tmux::install_render_options()?;
+    ensure_daemon()?;
 
     if tmux::has_session("tpane") {
         tmux::attach_session("tpane")
@@ -214,6 +230,29 @@ fn print_response(response: Response) -> Result<()> {
                 .error
                 .unwrap_or_else(|| "tpane request failed".to_string())
         )
+    }
+}
+
+fn plugin(command: PluginCommand) -> Result<()> {
+    match command {
+        PluginCommand::Add { url, name } => {
+            let path = plugins::add(&url, name.as_deref())?;
+            let _ = print_response(request(Request::Reload)?);
+            println!("added {}", path.display());
+            Ok(())
+        }
+        PluginCommand::List => {
+            for name in plugins::list()? {
+                println!("{name}");
+            }
+            Ok(())
+        }
+        PluginCommand::Remove { name } => {
+            plugins::remove(&name)?;
+            let _ = print_response(request(Request::Reload)?);
+            println!("removed {name}");
+            Ok(())
+        }
     }
 }
 
@@ -690,6 +729,25 @@ mod tests {
                 action: Some(_),
                 id: Some(_),
                 ..
+            })
+        ));
+    }
+
+    #[test]
+    fn plugin_add_parses_as_builtin_command() {
+        let cli = Cli::try_parse_from([
+            "tpane",
+            "plugin",
+            "add",
+            "https://example.test/foo.git",
+            "--name",
+            "foo",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Plugin {
+                command: PluginCommand::Add { .. }
             })
         ));
     }

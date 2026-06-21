@@ -1,20 +1,42 @@
 # Lua API
 
-tpane loads every `*.lua` file under `~/.config/tpane`.
+tpane loads top-level `*.lua` files under `~/.config/tpane` and `plugins/*/init.lua`.
+Other Lua files are libraries loaded with `require`.
 
 ## Kinds
 
-A kind tells tpane how to recognize what is running in a pane.
-
-Most kinds only need a process name:
+A kind tells tpane what a pane is and what label to show for it.
 
 ```lua
 tpane.kind { name = "psql", match = "psql" }
 ```
 
-This labels a pane as `psql` when any process in that pane is running `psql`.
-The match is exact: `pi` matches `pi` or `/usr/bin/pi`, but not `pip` or
-`compile`.
+When a pane is running `psql`, tpane marks that pane like this:
+
+```lua
+pane.kind  -- "psql"
+pane.label -- "psql"
+```
+
+You can use that in a widget. This status widget shows how many `psql` panes are
+running:
+
+```lua
+tpane.widget("databases", function(ctx)
+  local count = 0
+  for _, pane in ipairs(ctx.panes) do
+    if pane.kind == "psql" then count = count + 1 end
+  end
+  if count == 0 then return nil end
+  return { text = "db " .. count, fg = "green" }
+end)
+
+tpane.statusline { right = { "databases", "clock" } }
+```
+
+Now, when any pane in tmux is running `psql`, the statusline shows `db 1`,
+`db 2`, and so on. Full paths work too, so `/usr/bin/psql` is treated as
+`psql`.
 
 Use `detect` when process name is not enough:
 
@@ -34,16 +56,13 @@ You can change the shown label:
 
 ```lua
 tpane.kind {
-  name = "nvim",
-  match = "nvim",
+  name = "editor",
+  match = "my-editor",
   label = function(pane)
-    return "nvim · " .. pane.cwd_basename
+    return "editor · " .. pane.cwd_basename
   end,
 }
 ```
-
-`cwd_basename` is the last part of `cwd`. For `/home/me/project`, it is
-`project`.
 
 ## State
 
@@ -61,7 +80,7 @@ tpane.kind {
 }
 ```
 
-State values:
+State values are plain strings. Built-in presentations exist for:
 
 ```text
 blocked
@@ -69,6 +88,40 @@ working
 done_unseen
 idle_seen
 ```
+
+Declare how custom states render with `tpane.state`:
+
+```lua
+tpane.state("approval", { color = "magenta", glyph = "?" })
+local presentation = tpane.state("approval")
+```
+
+`color` is a tmux color. `glyph` is a marker used by Lua renderers such as the
+built-in `companions` widget and pane border renderer. Detection stays separate:
+a kind's `state` function may return any string.
+
+Example approval state:
+
+```lua
+tpane.state("approval", { color = "magenta", glyph = "?" })
+
+tpane.kind {
+  name = "reviewer",
+  match = "reviewer",
+  state = function(pane)
+    if pane:capture():match("approval required") then return "approval" end
+    if pane:capture():match("running") then return "working" end
+    return "idle"
+  end,
+}
+
+tpane.statusline {
+  right = { "companions", "clock" },
+}
+```
+
+`companions` shows panes created by `tpane.register_pane`/`tpane.toggle`, using
+filled/empty markers for visible/hidden panes and colors from `tpane.state`.
 
 ## Pane objects
 
@@ -113,8 +166,9 @@ end)
 ## Find panes
 
 ```lua
-local pane = tpane.find { tag = "logs", window = current.window }
-local agents = tpane.find_all { tag = "agent" }
+local current = tpane.panes()[1]
+local logs = tpane.find { tag = "logs", window = current.window }
+local all_logs = tpane.find_all { tag = "logs" }
 ```
 
 All fields in the query must match.
@@ -127,7 +181,7 @@ Register a pane you want to show/hide later:
 tpane.register_pane("logs", {
   dir = "below",
   size = "25%",
-  command = "zsh",
+  command = "tail -f logs/app.log",
 })
 ```
 
@@ -153,7 +207,7 @@ tag = "logs"              -- defaults to the registered name
 name = "logs"             -- stash name, defaults to the registered name
 dir = "below"             -- below | above | right | left
 size = "25%"
-command = "zsh"
+command = "tail -f logs/app.log" -- command to run in the pane
 title = "logs"
 label = "logs"
 blocked_message = "..."   -- shown instead of hiding a blocked pane
@@ -221,6 +275,147 @@ tpane.panel {
     }
   end,
 }
+```
+
+## Modules
+
+Use Lua's `require` for shared plugin code:
+
+```lua
+local helper = require("lib.helper") -- ~/.config/tpane/lib/helper.lua
+```
+
+Plugin modules can live under `plugins/<name>/` and be required as
+`require("<name>.module")`.
+
+## Status line
+
+Define widgets and compose tmux `status-left` / `status-right` from Lua:
+
+```lua
+tpane.widget("cwd", function(ctx)
+  return { text = ctx.pane and ctx.pane.cwd_basename or "", fg = "green" }
+end)
+
+tpane.statusline {
+  position = "bottom",
+  interval = 1,
+  left = { "session" },
+  right = { "cwd", "clock" },
+  separator = "  ",
+}
+```
+
+Widget functions receive a context table:
+
+```lua
+ctx.session  -- current client session
+ctx.window   -- current client window id
+ctx.pane     -- current client pane object, or nil when no panes exist
+ctx.panes    -- all pane objects
+```
+
+Widget functions return a raw string, a styled table with `text`, an array of
+strings/styled tables, or `nil` to hide the segment. Raw strings may include tmux
+formats and styles. Table style keys mirror tmux attributes: `fg`, `bg`, `bold`,
+`dim`, `italics`, `blink`, `reverse`, `hidden`, `strikethrough`, `underscore`,
+`align`, and `fill`.
+
+Built-in widgets: `session`, `clock`, `companions`. Raw tmux format strings are
+also supported.
+
+## Tmux options
+
+Set static tmux options from Lua with nested keys. Underscores become dashes:
+
+```lua
+tpane.options {
+  status = {
+    style = { bg = "default" },
+    left_length = 120,
+  },
+  pane = {
+    border = {
+      lines = "heavy",
+      style = { fg = "#51576d" },
+    },
+    active = {
+      border = {
+        style = { fg = "#8caaee" },
+      },
+    },
+  },
+}
+```
+
+Nested keys become tmux option names by joining them with `-`, so
+`status.left_length` sets `status-left-length`.
+
+Style options accept Lua style tables:
+
+```lua
+tpane.options {
+  status = { style = { bg = "default" } }, -- status-style bg=default
+}
+```
+
+Format options can be plain strings, or styled tables with `text`:
+
+```lua
+tpane.options {
+  window = {
+    status = {
+      current_format = { text = "#I:#W", fg = "blue", bold = true },
+    },
+  },
+}
+```
+
+Use a literal option name only when nesting would be awkward:
+
+```lua
+tpane.options {
+  ["some-tmux-option"] = "value",
+}
+```
+
+## Format helpers
+
+Use `tpane.fmt` for tmux conditionals that do not have Lua equivalents:
+
+```lua
+tpane.fmt.prefix("", "")
+tpane.fmt.when("window_zoomed_flag", "Z", "")
+```
+
+## Persistent store
+
+`tpane.store` is a small JSON-backed scratch store for plugins.
+
+```lua
+tpane.store.set("counter", 1)
+local value = tpane.store.get("counter")
+tpane.store.delete("counter")
+```
+
+Values may be strings, numbers, booleans, tables, or nil.
+
+## Workspaces
+
+Declare reusable layouts in Lua:
+
+```lua
+tpane.workspace {
+  name = "dev",
+  windows = {
+    { name = "app", command = "zsh" },
+    { name = "logs", panes = { { dir = "below", size = "30%", command = "tail -f app.log" } } },
+  },
+}
+
+tpane.command("dev", function()
+  tpane.apply_workspace("dev")
+end)
 ```
 
 ## Events
