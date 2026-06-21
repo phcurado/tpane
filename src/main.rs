@@ -19,14 +19,14 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use protocol::{DAEMON_SIGNATURE, Request, Response};
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(name = "castr")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Commands {
     /// Internal daemon entrypoint.
     #[command(hide = true)]
@@ -35,14 +35,23 @@ enum Commands {
         socket: PathBuf,
     },
 
-    /// Force one daemon scan now.
+    /// Force plugin reload and pane scan now.
     Refresh,
+
+    /// Reload Lua plugins now.
+    Reload,
+
+    /// Show Lua plugin load status.
+    Status,
 
     /// Check daemon health.
     Ping,
 
     /// Placeholder for a future detailed control view.
     Pick,
+
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 fn main() -> Result<()> {
@@ -53,6 +62,14 @@ fn main() -> Result<()> {
             let response = request(Request::Refresh)?;
             print_response(response)
         }
+        Some(Commands::Reload) => {
+            let response = request(Request::Reload)?;
+            print_response(response)
+        }
+        Some(Commands::Status) => {
+            let response = request(Request::Status)?;
+            print_response(response)
+        }
         Some(Commands::Ping) => {
             let response = request(Request::Ping)?;
             print_response(response)
@@ -61,6 +78,7 @@ fn main() -> Result<()> {
             let response = request(Request::Pick)?;
             print_response(response)
         }
+        Some(Commands::External(parts)) => run_external(parts),
         None => launch(),
     }
 }
@@ -160,6 +178,17 @@ fn print_response(response: Response) -> Result<()> {
     }
 }
 
+fn run_external(parts: Vec<String>) -> Result<()> {
+    let Some((name, args)) = parts.split_first() else {
+        bail!("missing command name");
+    };
+    let response = request(Request::Command {
+        name: name.clone(),
+        args: args.to_vec(),
+    })?;
+    print_response(response)
+}
+
 fn socket_path() -> Result<PathBuf> {
     let key = tmux_server_key();
     let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
@@ -196,4 +225,24 @@ fn current_uid() -> String {
         })
         .filter(|uid| !uid.is_empty())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_subcommand_keeps_priority_over_external() {
+        let cli = Cli::try_parse_from(["castr", "status"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Status)));
+    }
+
+    #[test]
+    fn unknown_subcommand_is_forwarded_as_external_command() {
+        let cli = Cli::try_parse_from(["castr", "hello", "a", "b"]).unwrap();
+        match cli.command {
+            Some(Commands::External(parts)) => assert_eq!(parts, ["hello", "a", "b"]),
+            other => panic!("expected external command, got wrong variant: {other:?}"),
+        }
+    }
 }

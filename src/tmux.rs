@@ -106,9 +106,135 @@ pub fn set_pane_var(pane_id: &str, name: &str, value: &str) -> Result<()> {
     tmux(&["set-option", "-p", "-t", pane_id, name, value]).map(|_| ())
 }
 
+pub fn get_pane_var(pane_id: &str, name: &str) -> Result<Option<String>> {
+    let value = tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        pane_id,
+        &format!("#{{{name}}}"),
+    ])?;
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
+}
+
 pub fn select_pane(pane_id: &str) -> Result<()> {
     tmux(&["select-window", "-t", pane_id])?;
     tmux(&["select-pane", "-t", pane_id]).map(|_| ())
+}
+
+pub struct SplitOptions {
+    pub direction: SplitDirection,
+    pub size: Option<String>,
+    pub cwd: Option<String>,
+    pub command: Option<String>,
+    pub detached: bool,
+}
+
+pub enum SplitDirection {
+    Horizontal,
+    Vertical,
+}
+
+pub fn split(target: &str, opts: SplitOptions) -> Result<String> {
+    tmux_owned(split_args(target, &opts))
+}
+
+fn split_args(target: &str, opts: &SplitOptions) -> Vec<String> {
+    let mut args = vec![
+        "split-window".to_string(),
+        "-P".to_string(),
+        "-F".to_string(),
+        "#{pane_id}".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+    ];
+    match opts.direction {
+        SplitDirection::Horizontal => args.push("-h".to_string()),
+        SplitDirection::Vertical => args.push("-v".to_string()),
+    }
+    if opts.detached {
+        args.push("-d".to_string());
+    }
+    if let Some(size) = &opts.size {
+        args.push("-l".to_string());
+        args.push(size.clone());
+    }
+    if let Some(cwd) = &opts.cwd {
+        args.push("-c".to_string());
+        args.push(cwd.clone());
+    }
+    if let Some(command) = &opts.command {
+        args.push(command.clone());
+    }
+    args
+}
+
+pub struct JoinOptions {
+    pub horizontal: bool,
+    pub size: Option<String>,
+}
+
+pub fn join(src_pane: &str, target: &str, opts: JoinOptions) -> Result<()> {
+    tmux_owned(join_args(src_pane, target, &opts)).map(|_| ())
+}
+
+fn join_args(src_pane: &str, target: &str, opts: &JoinOptions) -> Vec<String> {
+    let mut args = vec![
+        "join-pane".to_string(),
+        "-s".to_string(),
+        src_pane.to_string(),
+        "-t".to_string(),
+        target.to_string(),
+    ];
+    args.push(if opts.horizontal { "-h" } else { "-v" }.to_string());
+    if let Some(size) = &opts.size {
+        args.push("-l".to_string());
+        args.push(size.clone());
+    }
+    args
+}
+
+pub fn break_pane(pane: &str, dst_session: &str, name: &str) -> Result<()> {
+    tmux_owned(break_pane_args(pane, dst_session, name)).map(|_| ())
+}
+
+fn break_pane_args(pane: &str, dst_session: &str, name: &str) -> Vec<String> {
+    vec![
+        "break-pane".to_string(),
+        "-d".to_string(),
+        "-s".to_string(),
+        pane.to_string(),
+        "-t".to_string(),
+        dst_session.to_string(),
+        "-n".to_string(),
+        name.to_string(),
+    ]
+}
+
+pub fn zoom(pane: &str) -> Result<()> {
+    tmux(&["resize-pane", "-Z", "-t", pane]).map(|_| ())
+}
+
+pub fn is_zoomed(target: &str) -> Result<bool> {
+    Ok(tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        target,
+        "#{window_zoomed_flag}",
+    ])? == "1")
+}
+
+pub fn active_pane(target: &str) -> Result<String> {
+    tmux(&["display-message", "-p", "-t", target, "#{pane_id}"])
+}
+
+pub fn capture(pane: &str) -> Result<String> {
+    tmux(&["capture-pane", "-p", "-t", pane])
 }
 
 pub fn server_alive() -> bool {
@@ -120,6 +246,11 @@ pub fn server_alive() -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+fn tmux_owned(args: Vec<String>) -> Result<String> {
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    tmux(&refs)
 }
 
 fn tmux(args: &[&str]) -> Result<String> {
@@ -135,5 +266,77 @@ fn tmux(args: &[&str]) -> Result<String> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("tmux {} failed: {}", args.join(" "), stderr.trim())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_args_are_built_without_running_tmux() {
+        let args = split_args(
+            "%1",
+            &SplitOptions {
+                direction: SplitDirection::Horizontal,
+                size: Some("30%".to_string()),
+                cwd: Some("/tmp/work".to_string()),
+                command: Some("nvim".to_string()),
+                detached: true,
+            },
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "split-window",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                "%1",
+                "-h",
+                "-d",
+                "-l",
+                "30%",
+                "-c",
+                "/tmp/work",
+                "nvim",
+            ]
+        );
+    }
+
+    #[test]
+    fn join_args_are_built_without_running_tmux() {
+        let args = join_args(
+            "%2",
+            "%1",
+            &JoinOptions {
+                horizontal: false,
+                size: Some("40".to_string()),
+            },
+        );
+
+        assert_eq!(
+            args,
+            vec!["join-pane", "-s", "%2", "-t", "%1", "-v", "-l", "40"]
+        );
+    }
+
+    #[test]
+    fn break_pane_args_are_built_without_running_tmux() {
+        assert_eq!(
+            break_pane_args("%2", "hidden", "agent"),
+            vec![
+                "break-pane",
+                "-d",
+                "-s",
+                "%2",
+                "-t",
+                "hidden",
+                "-n",
+                "agent"
+            ]
+        );
     }
 }
