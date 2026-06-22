@@ -18,8 +18,8 @@ tpane.state("working", { color = "yellow", glyph = "●" })
 tpane.state("done_unseen", { color = "blue", glyph = "✓" })
 tpane.state("idle_seen", { color = "green", glyph = "●" })
 
-tpane.widget("session", function(ctx)
-  return { text = "[" .. (ctx.session or "") .. "] " }
+tpane.widget("session", function()
+  return "[#{client_session}] "
 end)
 
 tpane.widget("clock", function()

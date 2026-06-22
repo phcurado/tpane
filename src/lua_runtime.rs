@@ -2349,7 +2349,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_session_widget_leaves_room_before_tmux_windows() {
+    fn builtin_session_widget_uses_tmux_client_session() {
         let (runtime, panes) = runtime();
         panes.borrow_mut().push(pane("%1"));
         runtime
@@ -2358,7 +2358,7 @@ mod tests {
 
         let (status, errors) = runtime.render_statusline(Some("%1"));
         assert!(errors.is_empty());
-        assert_eq!(status.left.as_deref(), Some("[s] "));
+        assert_eq!(status.left.as_deref(), Some("[#{client_session}] "));
     }
 
     #[test]
