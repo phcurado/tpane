@@ -2255,7 +2255,7 @@ mod tests {
         let border = runtime.render_pane_border(&pane).unwrap().unwrap();
         assert_eq!(
             border,
-            "#[fg=yellow]● #[default]#[fg=yellow]build#[default]"
+            "#[fg=yellow] #[default]#[fg=yellow]build#[default]"
         );
     }
 
@@ -2300,10 +2300,18 @@ mod tests {
         claude.state = Some("approval".to_string());
         panes.borrow_mut().push(claude);
 
+        let mut idle = pane("%4");
+        idle.tag = Some("agent".to_string());
+        idle.label = "idle".to_string();
+        idle.state = Some("idle_seen".to_string());
+        panes.borrow_mut().push(idle);
+
         let mut codex = pane("%3");
         codex.kind = "codex".to_string();
         codex.label = "codex".to_string();
         codex.state = Some("done_unseen".to_string());
+        codex.window = "@2".to_string();
+        codex.home = Some("@2".to_string());
         panes.borrow_mut().push(codex);
 
         runtime
@@ -2315,7 +2323,7 @@ mod tests {
         assert_eq!(
             status.right.as_deref(),
             Some(
-                "#[fg=yellow]●#[default] pi  #[fg=yellow]⚠#[default] claude  #[fg=blue]✓#[default] codex"
+                "#[fg=yellow]#[default] pi  #[fg=yellow]#[default] claude  idle  |  #[fg=blue]1#[default]"
             )
         );
     }

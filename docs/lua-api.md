@@ -93,7 +93,7 @@ idle_seen
 Declare how custom states render with `tpane.state`:
 
 ```lua
-tpane.state("approval", { color = "yellow", glyph = "⚠" })
+tpane.state("approval", { color = "yellow", glyph = "" })
 local presentation = tpane.state("approval")
 ```
 
@@ -105,7 +105,7 @@ from detection is treated as `done_unseen` until the pane is focused.
 Example approval state:
 
 ```lua
-tpane.state("approval", { color = "yellow", glyph = "⚠" })
+tpane.state("approval", { color = "yellow", glyph = "" })
 
 tpane.kind {
   name = "reviewer",
@@ -121,13 +121,6 @@ tpane.statusline {
   right = { "companions", "clock" },
 }
 ```
-
-`agents` shows panes tagged as `agent` (and common agent kinds such as `pi`,
-`claude`, and `codex`) as compact state markers plus labels, for example
-`● pi  ⚠ claude  ✓ codex`.
-
-`companions` shows panes created by `tpane.register_pane`/`tpane.toggle`, using
-filled/empty markers for visible/hidden panes and colors from `tpane.state`.
 
 ## Pane objects
 
@@ -346,8 +339,9 @@ formats and styles. Table style keys mirror tmux attributes: `fg`, `bg`, `bold`,
 `dim`, `italics`, `blink`, `reverse`, `hidden`, `strikethrough`, `underscore`,
 `align`, and `fill`.
 
-Built-in widgets: `session`, `clock`, `agents`, `companions`. Raw tmux format
-strings are also supported.
+Built-in widgets: `session`, `clock`, `agents`, `companions`. `agents` shows
+agent panes in the current window by label and groups active/attention states in
+other windows as counts. Raw tmux format strings are also supported.
 
 ## Tmux options
 
