@@ -12,9 +12,10 @@ function tpane.fmt.when(var, yes, no)
   return "#{?" .. var .. "," .. yes .. "," .. (no or "") .. "}"
 end
 
-tpane.state("blocked", { color = "red", glyph = "●" })
+tpane.state("approval", { color = "yellow", glyph = "⚠" })
+tpane.state("blocked", { color = "red", glyph = "⚠" })
 tpane.state("working", { color = "yellow", glyph = "●" })
-tpane.state("done_unseen", { color = "blue", glyph = "●" })
+tpane.state("done_unseen", { color = "blue", glyph = "✓" })
 tpane.state("idle_seen", { color = "green", glyph = "●" })
 
 tpane.widget("session", function(ctx)
@@ -36,17 +37,43 @@ local function state_segment(state, fallback_glyph)
   return { text = presentation.glyph or fallback_glyph or "●", fg = presentation.color }
 end
 
+local function hidden_pane(pane)
+  return pane.session and pane.session:match("^__tpane%-hidden%-") ~= nil
+end
+
+local function compact_pane_segment(pane)
+  local presentation = state_presentation(pane.state)
+  if hidden_pane(pane) then
+    return { text = "○", fg = presentation.color or "default" }
+  end
+  return state_segment(pane.state, "●") or { text = "○", fg = "default" }
+end
+
+local agent_kinds = { pi = true, claude = true, codex = true }
+
+local function is_agent_pane(pane)
+  return pane.tag == "agent" or agent_kinds[pane.kind] == true
+end
+
+tpane.widget("agents", function(ctx)
+  local parts = {}
+  for _, pane in ipairs(ctx.panes or {}) do
+    if is_agent_pane(pane) then
+      parts[#parts + 1] = compact_pane_segment(pane)
+      parts[#parts + 1] = { text = " " .. pane.label }
+      parts[#parts + 1] = "  "
+    end
+  end
+  if #parts == 0 then return nil end
+  parts[#parts] = nil
+  return parts
+end)
+
 tpane.widget("companions", function(ctx)
   local parts = {}
   for _, pane in ipairs(ctx.panes or {}) do
     if pane.home then
-      local hidden = pane.session and pane.session:match("^__tpane%-hidden%-") ~= nil
-      if hidden then
-        local presentation = state_presentation(pane.state)
-        parts[#parts + 1] = { text = "○", fg = presentation.color or "default" }
-      else
-        parts[#parts + 1] = state_segment(pane.state, "●")
-      end
+      parts[#parts + 1] = compact_pane_segment(pane)
       parts[#parts + 1] = { text = " " .. pane.label }
       parts[#parts + 1] = "  "
     end

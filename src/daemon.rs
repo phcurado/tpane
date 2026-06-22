@@ -680,6 +680,13 @@ fn state_value(raw: &str, active: bool, previous: Option<&StateRecord>) -> Strin
                 "idle_seen".to_string()
             }
         }
+        "done" => {
+            if active {
+                "idle_seen".to_string()
+            } else {
+                "done_unseen".to_string()
+            }
+        }
         other => other.to_string(),
     }
 }
@@ -1020,6 +1027,8 @@ mod tests {
             ),
             "idle_seen"
         );
+        assert_eq!(state_value("done", false, None), "done_unseen");
+        assert_eq!(state_value("done", true, None), "idle_seen");
     }
 
     #[test]

@@ -968,36 +968,24 @@ fn parse_bind_key(
             context: true,
             popup: false,
         }),
-        [key, command, opts] if !matches!(command, Value::String(_)) => {
-            let (context, popup) = parse_keybind_opts(opts, true)?;
+        [key, command, opts] => {
+            let opts = parse_keybind_opts(opts, true)?;
             Ok(Keybind {
-                mode: "prefix".to_string(),
+                mode: opts.mode,
                 key: value_to_string(key, "key")?,
-                command: parse_bind_command_value(lua, commands, panes, generated, command.clone())?,
-                context,
-                popup,
-            })
-        }
-        [mode, key, command] => Ok(Keybind {
-            mode: value_to_string(mode, "mode")?,
-            key: value_to_string(key, "key")?,
-            command: parse_bind_command_value(lua, commands, panes, generated, command.clone())?,
-            context: true,
-            popup: false,
-        }),
-        [mode, key, command, opts, ..] => {
-            let (context, popup) = parse_keybind_opts(opts, true)?;
-            Ok(Keybind {
-                mode: value_to_string(mode, "mode")?,
-                key: value_to_string(key, "key")?,
-                command: parse_bind_command_value(lua, commands, panes, generated, command.clone())?,
-                context,
-                popup,
+                command: parse_bind_command_value(
+                    lua,
+                    commands,
+                    panes,
+                    generated,
+                    command.clone(),
+                )?,
+                context: opts.context,
+                popup: opts.popup,
             })
         }
         _ => Err(mlua::Error::RuntimeError(
-            "expected tpane.bind_key(key, command[, opts]) or tpane.bind_key(table, key, command[, opts])"
-                .to_string(),
+            "expected tpane.bind_key(key, command[, opts])".to_string(),
         )),
     }
 }
@@ -1032,7 +1020,13 @@ fn parse_bind_command_value(
     }
 }
 
-fn parse_keybind_opts(value: &Value, default_context: bool) -> mlua::Result<(bool, bool)> {
+struct KeybindOpts {
+    mode: String,
+    context: bool,
+    popup: bool,
+}
+
+fn parse_keybind_opts(value: &Value, default_context: bool) -> mlua::Result<KeybindOpts> {
     match value {
         Value::Table(table) => {
             for key in table
@@ -1041,7 +1035,7 @@ fn parse_keybind_opts(value: &Value, default_context: bool) -> mlua::Result<(boo
                 .map(|pair| pair.map(|(key, _)| key))
             {
                 match key?.as_str() {
-                    "popup" | "context" => {}
+                    "popup" | "context" | "prefix" | "table" => {}
                     other => {
                         return Err(mlua::Error::RuntimeError(format!(
                             "unknown bind_key option: {other}"
@@ -1055,9 +1049,22 @@ fn parse_keybind_opts(value: &Value, default_context: bool) -> mlua::Result<(boo
             } else {
                 default_context
             });
-            Ok((context, popup))
+            let mode = match table.get::<Option<String>>("table")? {
+                Some(table) => table,
+                None if table.get::<Option<bool>>("prefix")? == Some(false) => "root".to_string(),
+                None => "prefix".to_string(),
+            };
+            Ok(KeybindOpts {
+                mode,
+                context,
+                popup,
+            })
         }
-        Value::Nil => Ok((default_context, false)),
+        Value::Nil => Ok(KeybindOpts {
+            mode: "prefix".to_string(),
+            context: default_context,
+            popup: false,
+        }),
         other => Err(mlua::Error::RuntimeError(format!(
             "expected keybind opts table, got {other:?}"
         ))),
@@ -1866,7 +1873,7 @@ mod tests {
                 r#"
                 tpane.bind_key("a", { "pi" })
                 tpane.bind_key("A", { "pi", "expand" })
-                tpane.bind_key("root", "M-a", "pi expand")
+                tpane.bind_key("M-a", "pi expand", { prefix = false })
                 "#,
             )
             .unwrap();
@@ -1897,6 +1904,35 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn bind_key_opts_select_prefix_root_or_table() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.bind_key("C-g", function() end, { prefix = false })
+                tpane.bind_key("M-h", function() end)
+                tpane.bind_key("v", function() end, { table = "copy-mode-vi" })
+                tpane.bind_key("x", function() end, { prefix = false, table = "copy-mode-vi" })
+                tpane.bind_key("C-a", function() end, { prefix = true })
+                "#,
+            )
+            .unwrap();
+
+        let keybinds = runtime.keybinds();
+        assert_eq!(keybinds[0].mode, "root");
+        assert_eq!(keybinds[0].key, "C-g");
+        assert_eq!(keybinds[1].mode, "prefix");
+        assert_eq!(keybinds[1].key, "M-h");
+        assert_eq!(keybinds[2].mode, "copy-mode-vi");
+        assert_eq!(keybinds[2].key, "v");
+        assert_eq!(keybinds[3].mode, "copy-mode-vi");
+        assert_eq!(keybinds[3].key, "x");
+        assert_eq!(keybinds[4].mode, "prefix");
+        assert_eq!(keybinds[4].key, "C-a");
     }
 
     #[test]
@@ -2059,9 +2095,9 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.bind_key("root", "M-e", function()
+                tpane.bind_key("M-e", function()
                   return "ok"
-                end)
+                end, { prefix = false })
                 "#,
             )
             .unwrap();
@@ -2246,6 +2282,41 @@ mod tests {
         assert_eq!(
             status.right.as_deref(),
             Some("#[fg=magenta]?#[default] logs")
+        );
+    }
+
+    #[test]
+    fn agents_widget_shows_compact_agent_states() {
+        let (runtime, panes) = runtime();
+        let mut pi = pane("%1");
+        pi.tag = Some("agent".to_string());
+        pi.label = "pi".to_string();
+        pi.state = Some("working".to_string());
+        panes.borrow_mut().push(pi);
+
+        let mut claude = pane("%2");
+        claude.tag = Some("agent".to_string());
+        claude.label = "claude".to_string();
+        claude.state = Some("approval".to_string());
+        panes.borrow_mut().push(claude);
+
+        let mut codex = pane("%3");
+        codex.kind = "codex".to_string();
+        codex.label = "codex".to_string();
+        codex.state = Some("done_unseen".to_string());
+        panes.borrow_mut().push(codex);
+
+        runtime
+            .load_source("test.lua", r#"tpane.statusline { right = { "agents" } }"#)
+            .unwrap();
+
+        let (status, errors) = runtime.render_statusline(Some("%1"));
+        assert!(errors.is_empty());
+        assert_eq!(
+            status.right.as_deref(),
+            Some(
+                "#[fg=yellow]●#[default] pi  #[fg=yellow]⚠#[default] claude  #[fg=blue]✓#[default] codex"
+            )
         );
     }
 

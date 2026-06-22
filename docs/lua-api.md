@@ -83,6 +83,7 @@ tpane.kind {
 State values are plain strings. Built-in presentations exist for:
 
 ```text
+approval
 blocked
 working
 done_unseen
@@ -92,18 +93,19 @@ idle_seen
 Declare how custom states render with `tpane.state`:
 
 ```lua
-tpane.state("approval", { color = "magenta", glyph = "?" })
+tpane.state("approval", { color = "yellow", glyph = "⚠" })
 local presentation = tpane.state("approval")
 ```
 
 `color` is a tmux color. `glyph` is a marker used by Lua renderers such as the
-built-in `companions` widget and pane border renderer. Detection stays separate:
-a kind's `state` function may return any string.
+built-in `agents`/`companions` widgets and pane border renderer. Detection stays
+separate: a kind's `state` function may return any string. Returning `done`
+from detection is treated as `done_unseen` until the pane is focused.
 
 Example approval state:
 
 ```lua
-tpane.state("approval", { color = "magenta", glyph = "?" })
+tpane.state("approval", { color = "yellow", glyph = "⚠" })
 
 tpane.kind {
   name = "reviewer",
@@ -119,6 +121,10 @@ tpane.statusline {
   right = { "companions", "clock" },
 }
 ```
+
+`agents` shows panes tagged as `agent` (and common agent kinds such as `pi`,
+`claude`, and `codex`) as compact state markers plus labels, for example
+`● pi  ⚠ claude  ✓ codex`.
 
 `companions` shows panes created by `tpane.register_pane`/`tpane.toggle`, using
 filled/empty markers for visible/hidden panes and colors from `tpane.state`.
@@ -188,13 +194,13 @@ tpane.register_pane("logs", {
 Bind keys to it:
 
 ```lua
-tpane.bind_key("root", "M-e", function(pane)
+tpane.bind_key("M-e", function(pane)
   tpane.toggle(pane, "logs")
-end)
+end, { prefix = false })
 
-tpane.bind_key("root", "M-E", function(pane)
+tpane.bind_key("M-E", function(pane)
   tpane.expand(pane, "logs")
-end)
+end, { prefix = false })
 ```
 
 `toggle` shows or hides it. Hidden panes are stashed, so the process keeps
@@ -248,7 +254,19 @@ tpane.bind_key("a", { "hello" })
 tpane.bind_key("Space", { "control" }, { popup = true })
 ```
 
-Options: `popup`, `context`.
+Options: `popup`, `context`, `prefix`, `table`.
+
+By default, bindings use tmux's prefix table (`bind-key a`). Use
+`prefix = false` for a no-prefix binding (`bind-key -n C-g`), or `table` for a
+named tmux table (`bind-key -T copy-mode-vi v`):
+
+```lua
+tpane.bind_key("C-g", function(pane)
+  tpane.expand(pane)
+end, { prefix = false })
+
+tpane.bind_key("v", { "copy" }, { table = "copy-mode-vi" })
+```
 
 Do not use `tpane.bind_key` for keys you press repeatedly, such as pane
 movement or resize. Those should stay as plain tmux bindings because
@@ -328,8 +346,8 @@ formats and styles. Table style keys mirror tmux attributes: `fg`, `bg`, `bold`,
 `dim`, `italics`, `blink`, `reverse`, `hidden`, `strikethrough`, `underscore`,
 `align`, and `fill`.
 
-Built-in widgets: `session`, `clock`, `companions`. Raw tmux format strings are
-also supported.
+Built-in widgets: `session`, `clock`, `agents`, `companions`. Raw tmux format
+strings are also supported.
 
 ## Tmux options
 
