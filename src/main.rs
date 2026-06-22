@@ -78,8 +78,12 @@ enum Commands {
         id: Option<String>,
     },
 
-    #[command(external_subcommand)]
-    External(Vec<String>),
+    /// Run a Lua command.
+    Run {
+        name: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -126,7 +130,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::Plugin { command }) => plugin(command),
         Some(Commands::Control { once, action, id }) => control(once, action, id),
-        Some(Commands::External(parts)) => run_external(parts),
+        Some(Commands::Run { name, args }) => run_lua_command(name, args),
         None => launch(),
     }
 }
@@ -646,14 +650,8 @@ fn state_marker(state: Option<&str>) -> &'static str {
     }
 }
 
-fn run_external(parts: Vec<String>) -> Result<()> {
-    let Some((name, args)) = parts.split_first() else {
-        bail!("missing command name");
-    };
-    let response = request(Request::Command {
-        name: name.clone(),
-        args: args.to_vec(),
-    })?;
+fn run_lua_command(name: String, args: Vec<String>) -> Result<()> {
+    let response = request(Request::Command { name, args })?;
     print_response(response)
 }
 
@@ -700,18 +698,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn known_subcommand_keeps_priority_over_external() {
+    fn known_subcommand_parses_as_builtin() {
         let cli = Cli::try_parse_from(["tpane", "status"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Status)));
     }
 
     #[test]
-    fn unknown_subcommand_is_forwarded_as_external_command() {
-        let cli = Cli::try_parse_from(["tpane", "hello", "a", "b"]).unwrap();
+    fn lua_commands_run_under_run_subcommand() {
+        let cli = Cli::try_parse_from(["tpane", "run", "hello", "a", "b"]).unwrap();
         match cli.command {
-            Some(Commands::External(parts)) => assert_eq!(parts, ["hello", "a", "b"]),
-            other => panic!("expected external command, got wrong variant: {other:?}"),
+            Some(Commands::Run { name, args }) => {
+                assert_eq!(name, "hello");
+                assert_eq!(args, ["a", "b"]);
+            }
+            other => panic!("expected run command, got wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn unknown_subcommands_are_rejected() {
+        assert!(Cli::try_parse_from(["tpane", "hello", "a", "b"]).is_err());
     }
 
     #[test]

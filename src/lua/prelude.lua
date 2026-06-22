@@ -18,7 +18,7 @@ tpane.state("done_unseen", { color = "blue", glyph = "●" })
 tpane.state("idle_seen", { color = "green", glyph = "●" })
 
 tpane.widget("session", function(ctx)
-  return { text = "[" .. (ctx.session or "") .. "]" }
+  return { text = "[" .. (ctx.session or "") .. "] " }
 end)
 
 tpane.widget("clock", function()
@@ -122,6 +122,7 @@ function tpane.split(pane, opts)
     cwd = opts.cwd,
     command = opts.command,
     detached = opts.detached,
+    full = opts.full,
   }
   local created = tpane.pane(id)
   if opts.tag then created:set { tag = opts.tag } end
@@ -148,6 +149,7 @@ local function show_companion(from, opts)
       target = from.id,
       horizontal = companion_horizontal(opts),
       size = opts.size,
+      full = opts.full,
     }
     tpane.tmux.select(hidden.id)
     return hidden
@@ -160,6 +162,7 @@ local function show_companion(from, opts)
     command = opts.command,
     detached = true,
     tag = opts.tag,
+    full = opts.full,
   })
   pane:set { home = from.window, title = opts.title, label = opts.label }
   tpane.tmux.select(pane.id)

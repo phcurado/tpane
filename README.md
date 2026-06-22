@@ -88,6 +88,7 @@ tpane status   # show load/runtime errors
 tpane reload   # reload Lua config
 tpane refresh  # reload and rescan panes
 tpane doctor   # inspect hidden panes/sessions
+tpane run NAME # run a Lua command
 ```
 
 Run `tpane --help` for everything else.

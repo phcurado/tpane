@@ -1513,6 +1513,7 @@ fn tmux_api(lua: &Lua) -> Result<Table> {
                         cwd: opts.get("cwd")?,
                         command: opts.get("command")?,
                         detached: opts.get::<Option<bool>>("detached")?.unwrap_or(false),
+                        full: opts.get::<Option<bool>>("full")?.unwrap_or(false),
                     },
                 )
                 .map_err(mlua_external)
@@ -1532,6 +1533,7 @@ fn tmux_api(lua: &Lua) -> Result<Table> {
                     tmux::JoinOptions {
                         horizontal: opts.get::<Option<bool>>("horizontal")?.unwrap_or(true),
                         size: opts.get("size")?,
+                        full: opts.get::<Option<bool>>("full")?.unwrap_or(false),
                     },
                 )
                 .map_err(mlua_external)
@@ -1581,6 +1583,7 @@ fn tmux_api(lua: &Lua) -> Result<Table> {
                     target: opts.get("target")?,
                     horizontal: opts.get::<Option<bool>>("horizontal")?.unwrap_or(true),
                     size: opts.get("size")?,
+                    full: opts.get::<Option<bool>>("full")?.unwrap_or(false),
                 })
                 .map_err(mlua_external)
             })
@@ -2272,6 +2275,19 @@ mod tests {
         let (status, errors) = runtime.render_statusline(Some("%2"));
         assert!(errors.is_empty());
         assert_eq!(status.left.as_deref(), Some("[current]"));
+    }
+
+    #[test]
+    fn builtin_session_widget_leaves_room_before_tmux_windows() {
+        let (runtime, panes) = runtime();
+        panes.borrow_mut().push(pane("%1"));
+        runtime
+            .load_source("test.lua", "tpane.statusline { left = { 'session' } }")
+            .unwrap();
+
+        let (status, errors) = runtime.render_statusline(Some("%1"));
+        assert!(errors.is_empty());
+        assert_eq!(status.left.as_deref(), Some("[s] "));
     }
 
     #[test]

@@ -207,6 +207,7 @@ tag = "logs"              -- defaults to the registered name
 name = "logs"             -- stash name, defaults to the registered name
 dir = "below"             -- below | above | right | left
 size = "25%"
+full = true               -- split across the full window, not only the current pane
 command = "tail -f logs/app.log" -- command to run in the pane
 title = "logs"
 label = "logs"
@@ -221,6 +222,7 @@ Use this when you do not need a registered pane:
 local logs = tpane.split(pane, {
   dir = "below",
   size = "25%",
+  full = true,
   command = "zsh",
   tag = "logs",
 })
@@ -247,6 +249,10 @@ tpane.bind_key("Space", { "control" }, { popup = true })
 
 Options: `popup`, `context`.
 
+Do not use `tpane.bind_key` for keys you press repeatedly, such as pane
+movement or resize. Those should stay as plain tmux bindings because
+`tpane.bind_key` starts a `tpane run ...` process on each keypress.
+
 ## Commands
 
 Use commands when you want a CLI verb:
@@ -260,7 +266,7 @@ end)
 Then:
 
 ```sh
-tpane hello there
+tpane run hello there
 ```
 
 ## Panels

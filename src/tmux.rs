@@ -315,6 +315,7 @@ pub struct SplitOptions {
     pub cwd: Option<String>,
     pub command: Option<String>,
     pub detached: bool,
+    pub full: bool,
 }
 
 pub enum SplitDirection {
@@ -346,6 +347,9 @@ fn split_args(target: &str, opts: &SplitOptions) -> Vec<String> {
     if opts.detached {
         args.push("-d".to_string());
     }
+    if opts.full {
+        args.push("-f".to_string());
+    }
     if let Some(size) = &opts.size {
         args.push("-l".to_string());
         args.push(size.clone());
@@ -363,6 +367,7 @@ fn split_args(target: &str, opts: &SplitOptions) -> Vec<String> {
 pub struct JoinOptions {
     pub horizontal: bool,
     pub size: Option<String>,
+    pub full: bool,
 }
 
 pub fn join(src_pane: &str, target: &str, opts: JoinOptions) -> Result<()> {
@@ -378,6 +383,9 @@ fn join_args(src_pane: &str, target: &str, opts: &JoinOptions) -> Vec<String> {
         target.to_string(),
     ];
     args.push(if opts.horizontal { "-h" } else { "-v" }.to_string());
+    if opts.full {
+        args.push("-f".to_string());
+    }
     if let Some(size) = &opts.size {
         args.push("-l".to_string());
         args.push(size.clone());
@@ -415,6 +423,7 @@ pub struct UnstashOptions {
     pub target: String,
     pub horizontal: bool,
     pub size: Option<String>,
+    pub full: bool,
 }
 
 pub fn unstash(opts: UnstashOptions) -> Result<()> {
@@ -425,6 +434,7 @@ pub fn unstash(opts: UnstashOptions) -> Result<()> {
         JoinOptions {
             horizontal: opts.horizontal,
             size: opts.size,
+            full: opts.full,
         },
     )
 }
@@ -705,6 +715,7 @@ mod tests {
                 cwd: Some("/tmp/work".to_string()),
                 command: Some("nvim".to_string()),
                 detached: true,
+                full: true,
             },
         );
 
@@ -719,6 +730,7 @@ mod tests {
                 "%1",
                 "-h",
                 "-d",
+                "-f",
                 "-l",
                 "30%",
                 "-c",
@@ -736,12 +748,13 @@ mod tests {
             &JoinOptions {
                 horizontal: false,
                 size: Some("40".to_string()),
+                full: true,
             },
         );
 
         assert_eq!(
             args,
-            vec!["join-pane", "-s", "%2", "-t", "%1", "-v", "-l", "40"]
+            vec!["join-pane", "-s", "%2", "-t", "%1", "-v", "-f", "-l", "40"]
         );
     }
 

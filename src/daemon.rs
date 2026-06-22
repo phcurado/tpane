@@ -753,7 +753,7 @@ fn current_status_pane_id(snapshots: &[PaneSnapshot]) -> Option<String> {
 }
 
 fn keybind_command(command: &[String], context: bool) -> String {
-    let mut parts = vec!["tpane".to_string()];
+    let mut parts = vec!["tpane".to_string(), "run".to_string()];
     parts.extend(command.iter().cloned());
     if context {
         parts.push("#{pane_id}".to_string());
@@ -987,11 +987,11 @@ mod tests {
     fn keybind_command_injects_invoking_pane_context() {
         assert_eq!(
             keybind_command(&["pi".to_string(), "expand".to_string()], true),
-            "tpane pi expand #{pane_id}"
+            "tpane run pi expand #{pane_id}"
         );
         assert_eq!(
             keybind_command(&["control".to_string()], false),
-            "tpane control"
+            "tpane run control"
         );
     }
 
