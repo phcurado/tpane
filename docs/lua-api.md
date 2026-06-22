@@ -208,6 +208,7 @@ name = "logs"             -- stash name, defaults to the registered name
 dir = "below"             -- below | above | right | left
 size = "25%"
 full = true               -- split across the full window, not only the current pane
+anchor = { tag = "editor" } -- optional target pane for split/unstash; defaults to the window's non-companion pane
 command = "tail -f logs/app.log" -- command to run in the pane
 title = "logs"
 label = "logs"

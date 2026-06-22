@@ -137,16 +137,45 @@ local function companion_horizontal(opts)
   return opts.dir == "right" or opts.dir == "left" or opts.dir == "h" or opts.dir == "horizontal"
 end
 
+local function find_anchor_query(from, query)
+  local scoped = { window = from.window }
+  for key, value in pairs(query) do
+    scoped[key] = value
+  end
+  scoped.window = from.window
+  return tpane.find(scoped)
+end
+
+local function default_anchor(from)
+  for _, pane in ipairs(tpane.panes()) do
+    if pane.window == from.window and not pane.home then return pane end
+  end
+  return from
+end
+
+local function resolve_anchor(from, anchor)
+  if anchor == nil then return default_anchor(from) end
+  if type(anchor) == "table" then return find_anchor_query(from, anchor) or from end
+  if type(anchor) == "function" then
+    local resolved = anchor(from)
+    local id = tpane.resolve(resolved)
+    if id then return tpane.find { id = id } or tpane.pane(id) end
+    return from
+  end
+  error("anchor must be a table or function")
+end
+
 local function show_companion(from, opts)
   local visible = tpane.find(companion_query(from, opts))
   if visible then return visible end
 
+  local anchor = resolve_anchor(from, opts.anchor)
   local hidden = tpane.find { session = "__tpane-hidden-" .. from.window, tag = opts.tag, home = from.window }
     or tpane.find { session = "__pi-hidden-" .. from.window, tag = opts.tag, home = from.window }
   if hidden then
     tpane.tmux.unstash {
       pane = hidden.id,
-      target = from.id,
+      target = anchor.id,
       horizontal = companion_horizontal(opts),
       size = opts.size,
       full = opts.full,
@@ -155,10 +184,10 @@ local function show_companion(from, opts)
     return hidden
   end
 
-  local pane = tpane.split(from, {
+  local pane = tpane.split(anchor, {
     dir = opts.dir,
     size = opts.size,
-    cwd = from.cwd,
+    cwd = anchor.cwd or from.cwd,
     command = opts.command,
     detached = true,
     tag = opts.tag,
