@@ -27,7 +27,6 @@ impl Store {
         }
     }
 
-    #[cfg(test)]
     pub fn memory() -> Self {
         Self {
             path: None,

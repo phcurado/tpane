@@ -6,7 +6,8 @@ mod protocol;
 mod store;
 mod tmux;
 
-use std::collections::hash_map::DefaultHasher;
+use std::cell::RefCell;
+use std::collections::{HashSet, hash_map::DefaultHasher};
 use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -14,6 +15,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -88,14 +90,14 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum PluginCommand {
-    /// Clone a git plugin into the config plugin directory.
-    Add {
-        url: String,
-        #[arg(long)]
-        name: Option<String>,
-    },
     /// List installed plugins.
     List,
+    /// Install missing referenced plugins and update referenced plugins.
+    Sync,
+    /// Update one plugin, or all plugins when no name is given.
+    Update { name: Option<String> },
+    /// Remove installed plugins not referenced by config.
+    Clean,
     /// Remove an installed plugin.
     Remove { name: String },
 }
@@ -228,18 +230,55 @@ fn print_response(response: Response) -> Result<()> {
     }
 }
 
+fn referenced_plugins(load_plugins: bool) -> Result<HashSet<String>> {
+    let panes = Rc::new(RefCell::new(Vec::new()));
+    let runtime = if load_plugins {
+        lua_runtime::LuaRuntime::new(panes)?
+    } else {
+        lua_runtime::LuaRuntime::collector(panes)?
+    };
+    for path in lua_runtime::user_plugin_files() {
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        runtime
+            .load_source(&path.display().to_string(), &source)
+            .with_context(|| format!("failed to load {}", path.display()))?;
+    }
+    Ok(runtime.used_plugins())
+}
+
 fn plugin(command: PluginCommand) -> Result<()> {
     match command {
-        PluginCommand::Add { url, name } => {
-            let path = plugins::add(&url, name.as_deref())?;
-            let _ = print_response(request(Request::Reload)?);
-            println!("added {}", path.display());
-            Ok(())
-        }
         PluginCommand::List => {
             for name in plugins::list()? {
                 println!("{name}");
             }
+            Ok(())
+        }
+        PluginCommand::Sync => {
+            for name in referenced_plugins(true)? {
+                if plugins::plugin_dir(&name).exists() {
+                    for name in plugins::update(Some(&name))? {
+                        println!("synced {name}");
+                    }
+                }
+            }
+            let _ = print_response(request(Request::Reload)?);
+            Ok(())
+        }
+        PluginCommand::Update { name } => {
+            for name in plugins::update(name.as_deref())? {
+                println!("updated {name}");
+            }
+            let _ = print_response(request(Request::Reload)?);
+            Ok(())
+        }
+        PluginCommand::Clean => {
+            let keep = referenced_plugins(false)?;
+            for name in plugins::clean(&keep)? {
+                println!("removed {name}");
+            }
+            let _ = print_response(request(Request::Reload)?);
             Ok(())
         }
         PluginCommand::Remove { name } => {
@@ -731,20 +770,12 @@ mod tests {
     }
 
     #[test]
-    fn plugin_add_parses_as_builtin_command() {
-        let cli = Cli::try_parse_from([
-            "tpane",
-            "plugin",
-            "add",
-            "https://example.test/foo.git",
-            "--name",
-            "foo",
-        ])
-        .unwrap();
+    fn plugin_sync_parses_as_builtin_command() {
+        let cli = Cli::try_parse_from(["tpane", "plugin", "sync"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Commands::Plugin {
-                command: PluginCommand::Add { .. }
+                command: PluginCommand::Sync
             })
         ));
     }

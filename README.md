@@ -17,6 +17,16 @@ tpane.statusline {
 }
 ```
 
+Configure tmux window tabs without hand-writing tmux format strings:
+
+```lua
+tpane.tabline {
+  label = "cwd",
+  inactive = { fg = "#777777" },
+  current = { fg = "#8caaee", bold = true },
+}
+```
+
 Set tmux options with Lua tables when you want styling:
 
 ```lua
@@ -95,8 +105,21 @@ Run `tpane --help` for everything else.
 
 ## Plugins
 
+Plugins are loaded from Lua. If a git plugin is missing, tpane installs it the
+first time the config references it.
+
+```lua
+tpane.use("agents") -- packaged with tpane
+tpane.use("foo", { repo = "https://github.com/example/tpane-plugin.git", branch = "main" })
+tpane.use("theme", { repo = "https://github.com/example/theme.git", tag = "v1.2.0" })
+tpane.use("local", { repo = "https://github.com/example/mono.git", rev = "abc123", path = "plugins/local" })
+```
+
 ```sh
-tpane plugin add https://github.com/example/tpane-plugin.git
+tpane plugin sync # install/update plugins referenced by config
+tpane plugin update foo # update one installed plugin
+tpane plugin update # update all installed plugins
+tpane plugin clean # remove installed plugins not referenced by config
 tpane plugin list
-tpane plugin remove tpane-plugin
+tpane plugin remove foo
 ```

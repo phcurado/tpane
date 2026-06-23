@@ -11,6 +11,7 @@ use mlua::{
 };
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
+use crate::plugins::{self, PluginSpec};
 use crate::process::ProcessInfo;
 use crate::protocol::{PaneSnapshot, PanelCard, PanelView};
 use crate::store::Store;
@@ -28,6 +29,8 @@ pub struct LuaRuntime {
     states: Rc<RefCell<HashMap<String, StatePresentation>>>,
     statusline: Rc<RefCell<Option<StatusLineDef>>>,
     options: Rc<RefCell<Vec<(String, String)>>>,
+    used_plugins: Rc<RefCell<HashSet<String>>>,
+    load_plugins: bool,
     panes: Rc<RefCell<Vec<PaneSnapshot>>>,
     store: Rc<RefCell<Store>>,
 }
@@ -111,14 +114,25 @@ struct LuaPane {
 struct LuaProcTree(Vec<ProcessInfo>);
 
 impl LuaRuntime {
-    #[cfg(test)]
     pub fn new(panes: Rc<RefCell<Vec<PaneSnapshot>>>) -> Result<Self> {
         Self::with_store(panes, Rc::new(RefCell::new(Store::memory())))
+    }
+
+    pub fn collector(panes: Rc<RefCell<Vec<PaneSnapshot>>>) -> Result<Self> {
+        Self::with_store_and_plugin_loading(panes, Rc::new(RefCell::new(Store::memory())), false)
     }
 
     pub fn with_store(
         panes: Rc<RefCell<Vec<PaneSnapshot>>>,
         store: Rc<RefCell<Store>>,
+    ) -> Result<Self> {
+        Self::with_store_and_plugin_loading(panes, store, true)
+    }
+
+    fn with_store_and_plugin_loading(
+        panes: Rc<RefCell<Vec<PaneSnapshot>>>,
+        store: Rc<RefCell<Store>>,
+        load_plugins: bool,
     ) -> Result<Self> {
         let lua = Lua::new();
         let kinds = Rc::new(RefCell::new(Vec::new()));
@@ -131,6 +145,7 @@ impl LuaRuntime {
         let states = Rc::new(RefCell::new(HashMap::new()));
         let statusline = Rc::new(RefCell::new(None));
         let options = Rc::new(RefCell::new(Vec::new()));
+        let used_plugins = Rc::new(RefCell::new(HashSet::new()));
         let runtime = Self {
             lua,
             kinds,
@@ -143,12 +158,13 @@ impl LuaRuntime {
             states,
             statusline,
             options,
+            used_plugins,
+            load_plugins,
             panes,
             store,
         };
         runtime.install_api()?;
         runtime.load_prelude()?;
-        runtime.load_builtin_agents()?;
         Ok(runtime)
     }
 
@@ -210,6 +226,38 @@ impl LuaRuntime {
 
     fn install_api(&self) -> Result<()> {
         let tpane = self.lua.create_table().map_err(lua_err)?;
+        let use_plugin_loaded = Rc::clone(&self.used_plugins);
+        let load_plugins = self.load_plugins;
+        let use_plugin = self
+            .lua
+            .create_function(move |lua, args: mlua::MultiValue| {
+                let values = args.into_iter().collect::<Vec<_>>();
+                let (name, spec) = match values.as_slice() {
+                    [Value::String(name)] => (name.to_string_lossy(), PluginSpec::default()),
+                    [Value::String(name), Value::Table(table)] => {
+                        (name.to_string_lossy(), plugin_spec_from_lua(table)?)
+                    }
+                    _ => {
+                        return Err(mlua::Error::RuntimeError(
+                            "expected tpane.use(name[, opts])".to_string(),
+                        ));
+                    }
+                };
+                if use_plugin_loaded.borrow().contains(&name) {
+                    return Ok(());
+                }
+                if load_plugins {
+                    load_plugin(lua, &name, &spec)?;
+                } else {
+                    plugins::validate_plugin_name(&name).map_err(mlua_external)?;
+                    plugins::validate_spec(&spec).map_err(mlua_external)?;
+                }
+                use_plugin_loaded.borrow_mut().insert(name);
+                Ok(())
+            })
+            .map_err(lua_err)?;
+        tpane.set("use", use_plugin).map_err(lua_err)?;
+
         let kinds = Rc::clone(&self.kinds);
         let register_kind = self
             .lua
@@ -456,11 +504,6 @@ impl LuaRuntime {
             .map_err(|error| anyhow!("failed to load Lua prelude: {error}"))
     }
 
-    fn load_builtin_agents(&self) -> Result<()> {
-        self.load_source("builtin-agents.lua", BUILTIN_AGENTS)
-            .map_err(|error| anyhow!("failed to load built-in agent Lua plugin: {error}"))
-    }
-
     pub fn load_builtins(&self) -> Result<()> {
         self.load_source("builtin-kinds.lua", BUILTIN_KINDS)
             .map_err(|error| anyhow!("failed to load built-in Lua kinds: {error}"))
@@ -472,6 +515,10 @@ impl LuaRuntime {
 
     pub fn keybinds(&self) -> Vec<Keybind> {
         self.keybinds.borrow().clone()
+    }
+
+    pub fn used_plugins(&self) -> HashSet<String> {
+        self.used_plugins.borrow().clone()
     }
 
     pub fn render_panels(&self) -> Result<Vec<PanelView>> {
@@ -731,17 +778,6 @@ fn collect_lua_files(dir: &Path, files: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("lua") {
             files.push(path);
-        }
-    }
-
-    let plugins = dir.join("plugins");
-    let Ok(entries) = fs::read_dir(plugins) else {
-        return;
-    };
-    for entry in entries.filter_map(std::result::Result::ok) {
-        let init = entry.path().join("init.lua");
-        if init.is_file() {
-            files.push(init);
         }
     }
 }
@@ -1220,6 +1256,50 @@ fn state_presentation_table(lua: &Lua, presentation: &StatePresentation) -> mlua
     Ok(Value::Table(table))
 }
 
+fn plugin_spec_from_lua(table: &Table) -> mlua::Result<PluginSpec> {
+    let url: Option<String> = table.get("url")?;
+    let repo: Option<String> = table.get("repo")?;
+    if url.is_some() && repo.is_some() && url != repo {
+        return Err(mlua::Error::RuntimeError(
+            "plugin spec cannot set different url and repo values".to_string(),
+        ));
+    }
+    Ok(PluginSpec {
+        url: url.or(repo),
+        branch: table.get("branch")?,
+        tag: table.get("tag")?,
+        rev: table.get("rev")?,
+        path: table.get("path")?,
+    })
+}
+
+fn load_plugin(lua: &Lua, name: &str, spec: &PluginSpec) -> mlua::Result<()> {
+    plugins::validate_plugin_name(name).map_err(mlua_external)?;
+    plugins::validate_spec(spec).map_err(mlua_external)?;
+    if spec.url.is_some() {
+        plugins::ensure(name, spec).map_err(mlua_external)?;
+    } else {
+        plugins::assert_compatible(name, spec).map_err(mlua_external)?;
+    }
+
+    let entrypoint = plugins::entrypoint(name, spec).map_err(mlua_external)?;
+    if entrypoint.is_file() {
+        let source = fs::read_to_string(&entrypoint).map_err(mlua::Error::external)?;
+        return lua
+            .load(&source)
+            .set_name(entrypoint.display().to_string())
+            .exec();
+    }
+
+    match name {
+        "agents" => lua
+            .load(PACKAGED_PLUGIN_AGENTS)
+            .set_name("packaged/plugins/agents/init.lua")
+            .exec(),
+        _ => Err(mlua::Error::RuntimeError(format!("unknown plugin: {name}"))),
+    }
+}
+
 fn install_package_path(lua: &Lua) -> Result<()> {
     install_package_path_for(lua, &config_dir())
 }
@@ -1231,8 +1311,8 @@ fn install_package_path_for(lua: &Lua, config_dir: &Path) -> Result<()> {
     let paths = [
         format!("{config}/?.lua"),
         format!("{config}/?/init.lua"),
-        format!("{config}/plugins/?.lua"),
-        format!("{config}/plugins/?/init.lua"),
+        format!("{}/?.lua", plugins::plugin_root().display()),
+        format!("{}/?/init.lua", plugins::plugin_root().display()),
     ]
     .join(";");
     let next = if current.is_empty() {
@@ -1371,7 +1451,12 @@ fn lua_table_to_json(table: Table, seen: &mut HashSet<usize>) -> mlua::Result<Js
             }
         }
 
-        if array_like {
+        if !array_values.is_empty() {
+            if !array_like {
+                return Err(mlua::Error::RuntimeError(
+                    "cannot store table with mixed array and object keys".to_string(),
+                ));
+            }
             array_values.sort_by_key(|(idx, _)| *idx);
             if array_values
                 .iter()
@@ -1382,11 +1467,11 @@ fn lua_table_to_json(table: Table, seen: &mut HashSet<usize>) -> mlua::Result<Js
                     array_values.into_iter().map(|(_, value)| value).collect(),
                 ));
             }
+            return Err(mlua::Error::RuntimeError(
+                "cannot store sparse array table".to_string(),
+            ));
         }
 
-        for (idx, value) in array_values {
-            object.insert(idx.to_string(), value);
-        }
         Ok(JsonValue::Object(object))
     })();
 
@@ -1810,7 +1895,7 @@ fn basename(path: &str) -> String {
 
 const PRELUDE: &str = include_str!("lua/prelude.lua");
 
-const BUILTIN_AGENTS: &str = include_str!("lua/builtin_agents.lua");
+const PACKAGED_PLUGIN_AGENTS: &str = include_str!("../plugins/agents/init.lua");
 
 const BUILTIN_KINDS: &str = include_str!("lua/builtin_kinds.lua");
 
@@ -1848,7 +1933,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_lua_files_loads_top_level_and_plugin_inits() {
+    fn collect_lua_files_loads_only_top_level_config() {
         let root = std::env::temp_dir().join(format!("tpane-lua-files-{}", std::process::id()));
         let nested = root.join("lib");
         let plugin = root.join("plugins/foo");
@@ -1866,7 +1951,7 @@ mod tests {
             .iter()
             .map(|path| path.strip_prefix(&root).unwrap().display().to_string())
             .collect::<Vec<_>>();
-        assert_eq!(rel, ["a.lua", "plugins/foo/init.lua"]);
+        assert_eq!(rel, ["a.lua"]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2068,6 +2153,46 @@ mod tests {
             runtime.run_command("read", &[]).unwrap().as_deref(),
             Some("2:b")
         );
+    }
+
+    #[test]
+    fn store_rejects_sparse_lua_array_tables() {
+        let panes = Rc::new(RefCell::new(Vec::new()));
+        let store = Rc::new(RefCell::new(Store::memory()));
+        let runtime = LuaRuntime::with_store(panes, store).unwrap();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.command("write", function()
+                  tpane.store.set("sparse", { [1] = "a", [3] = "c" })
+                end)
+                "#,
+            )
+            .unwrap();
+
+        let error = runtime.run_command("write", &[]).unwrap_err().to_string();
+        assert!(error.contains("cannot store sparse array table"));
+    }
+
+    #[test]
+    fn store_rejects_mixed_lua_table_keys() {
+        let panes = Rc::new(RefCell::new(Vec::new()));
+        let store = Rc::new(RefCell::new(Store::memory()));
+        let runtime = LuaRuntime::with_store(panes, store).unwrap();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.command("write", function()
+                  tpane.store.set("mixed", { "a", name = "b" })
+                end)
+                "#,
+            )
+            .unwrap();
+
+        let error = runtime.run_command("write", &[]).unwrap_err().to_string();
+        assert!(error.contains("cannot store table with mixed array and object keys"));
     }
 
     #[test]
@@ -2402,7 +2527,13 @@ mod tests {
         panes.borrow_mut().push(codex);
 
         runtime
-            .load_source("test.lua", r#"tpane.statusline { right = { "agents" } }"#)
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.use("agents")
+                tpane.statusline { right = { "agents" } }
+                "#,
+            )
             .unwrap();
 
         let (status, errors) = runtime.render_statusline(Some("%1"));

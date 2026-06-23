@@ -1,6 +1,7 @@
 # Lua API
 
-tpane loads top-level `*.lua` files under `~/.config/tpane` and `plugins/*/init.lua`.
+tpane loads top-level `*.lua` files under `~/.config/tpane`.
+Plugins load only when referenced with `tpane.use`.
 Other Lua files are libraries loaded with `require`.
 
 ## Kinds
@@ -295,16 +296,39 @@ tpane.panel {
 }
 ```
 
-## Modules
+## Modules and plugins
 
-Use Lua's `require` for shared plugin code:
+Use Lua's `require` for shared config code:
 
 ```lua
 local helper = require("lib.helper") -- ~/.config/tpane/lib/helper.lua
 ```
 
-Plugin modules can live under `plugins/<name>/` and be required as
-`require("<name>.module")`.
+Installed plugins live under `~/.local/share/tpane/plugins/<name>`. They are not
+auto-loaded. Reference them from config with `tpane.use`:
+
+```lua
+tpane.use("agents") -- packaged with tpane
+tpane.use("foo", { repo = "https://github.com/example/tpane-plugin.git", branch = "main" })
+tpane.use("theme", { repo = "https://github.com/example/theme.git", tag = "v1.2.0" })
+tpane.use("tool", { repo = "https://github.com/example/mono.git", rev = "abc123", path = "plugins/tool" })
+```
+
+`repo` is the git repository URL (`url` also works). `branch`, `tag`, and `rev`
+are mutually exclusive. `path` is relative to the plugin repository and is useful
+for monorepos. If `repo` is set and the plugin is missing, tpane installs it
+before loading it.
+
+Plugin commands are for maintenance; installation normally comes from `tpane.use`:
+
+```sh
+tpane plugin sync # install/update plugins referenced by config
+tpane plugin update foo
+tpane plugin update
+tpane plugin clean
+tpane plugin list
+tpane plugin remove foo
+```
 
 ## Status line
 
@@ -339,10 +363,11 @@ formats and styles. Table style keys mirror tmux attributes: `fg`, `bg`, `bold`,
 `dim`, `italics`, `blink`, `reverse`, `hidden`, `strikethrough`, `underscore`,
 `align`, and `fill`.
 
-Built-in widgets: `session`, `clock`, `agents`, `companions`. `agents` is the
-bundled agent-cockpit plugin: it shows agent panes in the current window by
-label and groups active/attention states in other windows as counts. Raw tmux
-format strings are also supported.
+Built-in widgets: `session`, `clock`, `companions`. The packaged `agents`
+plugin adds the `agents` widget and `agent_next` command when referenced with
+`tpane.use("agents")`. It shows agent panes in the current window by label and
+groups active/attention states in other windows as counts. Raw tmux format
+strings are also supported.
 
 Use `tpane.tabline` for the common window-status format without hand-writing
 nested tmux options:
@@ -421,7 +446,7 @@ tpane.fmt.when("window_zoomed_flag", "Z", "")
 
 ## Public API surface
 
-The intended public Lua surface is: `tpane.kind`, `tpane.state`,
+The intended public Lua surface is: `tpane.use`, `tpane.kind`, `tpane.state`,
 `tpane.widget`, `tpane.statusline`, `tpane.tabline`, `tpane.options`,
 `tpane.on`, `tpane.command`, `tpane.panel`, `tpane.bind_key`, `tpane.panes`,
 `tpane.find`, `tpane.find_all`, pane objects/handles, reusable pane helpers
