@@ -57,6 +57,12 @@ enum Commands {
     /// Check daemon health.
     Ping,
 
+    /// Update tpane itself.
+    Update {
+        #[arg(long)]
+        version: Option<String>,
+    },
+
     /// Set pane state.
     SetState { id: String, state: String },
 
@@ -124,6 +130,7 @@ fn main() -> Result<()> {
             let response = request(Request::Ping)?;
             print_response(response)
         }
+        Some(Commands::Update { version }) => self_update(version),
         Some(Commands::SetState { id, state }) => {
             let response = request(Request::SetState { id, state })?;
             print_response(response)
@@ -253,18 +260,38 @@ fn referenced_plugins(load_plugins: bool) -> Result<HashSet<String>> {
     Ok(referenced_plugin_specs(load_plugins)?.into_keys().collect())
 }
 
-fn plugin_status_line(status: &plugins::PluginStatus) -> String {
-    let ref_name = status
-        .branch
-        .as_ref()
-        .map(|branch| format!("branch={branch}"))
-        .or_else(|| status.tag.as_ref().map(|tag| format!("tag={tag}")))
-        .or_else(|| status.rev.as_ref().map(|rev| format!("rev={rev}")))
-        .unwrap_or_else(|| "ref=default".to_string());
+fn plugin_status_lines(statuses: &[plugins::PluginStatus]) -> Vec<String> {
+    let packaged = statuses
+        .iter()
+        .filter(|status| packaged_plugin(status) && status.referenced)
+        .map(|status| status.name.as_str())
+        .collect::<Vec<_>>();
+    let git_statuses = statuses
+        .iter()
+        .filter(|status| !packaged_plugin(status))
+        .collect::<Vec<_>>();
+    let mut lines = Vec::new();
+
+    if git_statuses.is_empty() {
+        lines.push("No git plugins installed.".to_string());
+    } else {
+        lines.extend(git_statuses.into_iter().map(git_plugin_status_line));
+    }
+
+    if !packaged.is_empty() {
+        lines.push(format!("Packaged plugins: {}", packaged.join(", ")));
+    }
+
+    lines
+}
+
+fn packaged_plugin(status: &plugins::PluginStatus) -> bool {
+    status.url.is_none() && status.name == "agents" && !status.installed
+}
+
+fn git_plugin_status_line(status: &plugins::PluginStatus) -> String {
     let installed = if status.installed {
         "installed"
-    } else if status.url.is_none() && status.name == "agents" {
-        "packaged"
     } else {
         "missing"
     };
@@ -273,22 +300,74 @@ fn plugin_status_line(status: &plugins::PluginStatus) -> String {
     } else {
         "unreferenced"
     };
-    let dirty = status
-        .dirty
-        .map(|dirty| if dirty { "dirty" } else { "clean" })
-        .unwrap_or("-");
-    let update = status
-        .update_available
-        .map(|available| if available { "update" } else { "current" })
-        .unwrap_or("-");
-    let current = status.current.as_deref().unwrap_or("-");
-    let locked = status.locked.as_deref().unwrap_or("-");
-    let url = status.url.as_deref().unwrap_or("packaged/local");
-    let path = status.path.as_deref().unwrap_or(".");
-    format!(
-        "{}\t{}\t{}\t{}\t{}\tpath={}\tcurrent={}\tlocked={}\t{}\t{}",
-        status.name, referenced, installed, url, ref_name, path, current, locked, dirty, update
-    )
+    let mut parts = vec![format!("{}: {installed}, {referenced}", status.name)];
+    if let Some(branch) = &status.branch {
+        parts.push(format!("branch {branch}"));
+    } else if let Some(tag) = &status.tag {
+        parts.push(format!("tag {tag}"));
+    } else if let Some(rev) = &status.rev {
+        parts.push(format!("rev {}", short_commit(rev)));
+    }
+    if let Some(path) = &status.path {
+        parts.push(format!("path {path}"));
+    }
+    if let Some(dirty) = status.dirty {
+        parts.push(if dirty { "dirty" } else { "clean" }.to_string());
+    }
+    if let Some(available) = status.update_available {
+        parts.push(
+            if available {
+                "update available"
+            } else {
+                "current"
+            }
+            .to_string(),
+        );
+    }
+    if let Some(current) = &status.current {
+        parts.push(format!("at {}", short_commit(current)));
+    }
+    if let Some(locked) = &status.locked
+        && status.current.as_deref() != Some(locked)
+    {
+        parts.push(format!("locked {}", short_commit(locked)));
+    }
+    if let Some(url) = &status.url {
+        parts.push(url.clone());
+    }
+    parts.join("; ")
+}
+
+fn short_commit(commit: &str) -> &str {
+    commit.get(..8).unwrap_or(commit)
+}
+
+fn reload_plugins_silently() {
+    if let Ok(response) = request(Request::Reload)
+        && !response.ok
+    {
+        eprintln!(
+            "reload failed: {}",
+            response
+                .error
+                .unwrap_or_else(|| "unknown error".to_string())
+        );
+    }
+}
+
+fn self_update(version: Option<String>) -> Result<()> {
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg("curl -fsSL https://raw.githubusercontent.com/phcurado/tpane/main/install.sh | sh");
+    if let Some(version) = version {
+        command.env("VERSION", version);
+    }
+    let status = command.status().context("failed to run tpane updater")?;
+    if !status.success() {
+        bail!("tpane update failed");
+    }
+    Ok(())
 }
 
 fn plugin(command: PluginCommand) -> Result<()> {
@@ -300,36 +379,51 @@ fn plugin(command: PluginCommand) -> Result<()> {
             Ok(())
         }
         PluginCommand::Status => {
-            for status in plugins::status(&referenced_plugin_specs(false)?)? {
-                println!("{}", plugin_status_line(&status));
+            for line in plugin_status_lines(&plugins::status(&referenced_plugin_specs(false)?)?) {
+                println!("{line}");
             }
             Ok(())
         }
         PluginCommand::Sync => {
-            for name in plugins::sync(&referenced_plugin_specs(true)?)? {
-                println!("synced {name}");
+            let synced = plugins::sync(&referenced_plugin_specs(true)?)?;
+            if synced.is_empty() {
+                println!("nothing to sync");
+            } else {
+                for name in synced {
+                    println!("synced {name}");
+                }
+                reload_plugins_silently();
             }
-            let _ = print_response(request(Request::Reload)?);
             Ok(())
         }
         PluginCommand::Update { name } => {
-            for name in plugins::update(name.as_deref())? {
-                println!("updated {name}");
+            let updated = plugins::update(name.as_deref())?;
+            if updated.is_empty() {
+                println!("nothing to update");
+            } else {
+                for name in updated {
+                    println!("updated {name}");
+                }
+                reload_plugins_silently();
             }
-            let _ = print_response(request(Request::Reload)?);
             Ok(())
         }
         PluginCommand::Clean => {
             let keep = referenced_plugins(false)?;
-            for name in plugins::clean(&keep)? {
-                println!("removed {name}");
+            let removed = plugins::clean(&keep)?;
+            if removed.is_empty() {
+                println!("nothing to clean");
+            } else {
+                for name in removed {
+                    println!("removed {name}");
+                }
+                reload_plugins_silently();
             }
-            let _ = print_response(request(Request::Reload)?);
             Ok(())
         }
         PluginCommand::Remove { name } => {
             plugins::remove(&name)?;
-            let _ = print_response(request(Request::Reload)?);
+            reload_plugins_silently();
             println!("removed {name}");
             Ok(())
         }
@@ -834,6 +928,17 @@ mod tests {
             Some(Commands::Plugin {
                 command: PluginCommand::Status
             })
+        ));
+    }
+
+    #[test]
+    fn update_parses_as_builtin_command() {
+        let cli = Cli::try_parse_from(["tpane", "update", "--version", "v1.2.3"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Update {
+                version: Some(version)
+            }) if version == "v1.2.3"
         ));
     }
 
