@@ -1,6 +1,6 @@
 # tpane
 
-Configure and extend tmux with Lua.
+Extend your tmux configuration with Lua.
 
 ## Example
 
@@ -31,18 +31,18 @@ Or add keybinds and work with complex flows. Say you want a logs pane below the 
 ```lua
 -- ~/.config/tpane/init.lua
 tpane.register_pane("logs", {
-  dir = "below",
+  side = "bottom",
   size = "25%",
   command = "tail -f logs/app.log",
 })
 
-tpane.bind_key("root", "M-e", function(pane)
+tpane.bind_key("M-e", function(pane)
   tpane.toggle(pane, "logs")
-end)
+end, { prefix = false })
 
-tpane.bind_key("root", "M-E", function(pane)
+tpane.bind_key("M-E", function(pane)
   tpane.expand(pane, "logs")
-end)
+end, { prefix = false })
 ```
 
 `M-e` shows or hides a pane running `tail -f logs/app.log` below the current pane.
@@ -83,7 +83,7 @@ Full Lua reference: [`docs/lua-api.md`](docs/lua-api.md).
 ## CLI
 
 ```sh
-tpane          # start or reload the daemon for the current tmux server
+tpane          # start or reload the daemon from inside tmux
 tpane status   # show load/runtime errors
 tpane reload   # reload Lua config
 tpane refresh  # reload and rescan panes

@@ -95,6 +95,7 @@ struct Daemon {
     status_interval: Option<u64>,
     options: HashMap<String, String>,
     pane_borders: HashMap<String, String>,
+    pane_vars: HashMap<(String, String), String>,
     config_sig: Vec<(PathBuf, SystemTime)>,
 }
 
@@ -121,6 +122,7 @@ impl Daemon {
             status_interval: None,
             options: HashMap::new(),
             pane_borders: HashMap::new(),
+            pane_vars: HashMap::new(),
             config_sig: config_signature(),
         };
         daemon.reload_plugins()?;
@@ -267,15 +269,17 @@ impl Daemon {
         for pane in panes {
             let proc_tree = table.tree(pane.pid);
             if let Some(detection) = self.lua.detect(&pane, proc_tree.clone())? {
-                tmux::set_pane_var(&pane.id, "@tpane_kind", &detection.kind)?;
-                tmux::set_pane_var(&pane.id, "@tpane_label", &detection.label)?;
+                self.set_pane_var(&pane.id, "@tpane_kind", &detection.kind)?;
+                self.set_pane_var(&pane.id, "@tpane_label", &detection.label)?;
                 if let Some(color) = &detection.color {
-                    tmux::set_pane_var(&pane.id, "@tpane_color", color)?;
+                    self.set_pane_var(&pane.id, "@tpane_color", color)?;
+                } else {
+                    self.unset_pane_var(&pane.id, "@tpane_color")?;
                 }
                 if pane.tag.is_none()
                     && let Some(tag) = &detection.tag
                 {
-                    tmux::set_pane_var(&pane.id, "@tpane_tag", tag)?;
+                    self.set_pane_var(&pane.id, "@tpane_tag", tag)?;
                 }
                 let state = detection
                     .raw_state
@@ -304,6 +308,17 @@ impl Daemon {
             }
         }
 
+        let current_pane_id = current_status_pane_id(&snapshots);
+        let current_ids = snapshots
+            .iter()
+            .map(|pane| pane.id.clone())
+            .collect::<HashSet<_>>();
+        self.pane_vars
+            .retain(|(pane_id, _), _| current_ids.contains(pane_id));
+        self.pane_borders
+            .retain(|pane_id, _| current_ids.contains(pane_id));
+        *self.panes.borrow_mut() = snapshots.clone();
+
         self.update_pane_borders(&snapshots)?;
 
         let status = status_strip(&snapshots, !self.status_errors().is_empty(), |state| {
@@ -314,11 +329,29 @@ impl Daemon {
             self.status_strip = status;
         }
         self.update_events(&snapshots);
-        let current_pane_id = current_status_pane_id(&snapshots);
-        *self.panes.borrow_mut() = snapshots;
         self.update_statusline(current_pane_id.as_deref())?;
         self.store.borrow_mut().flush()?;
         Ok(count)
+    }
+
+    fn set_pane_var(&mut self, pane_id: &str, name: &str, value: &str) -> Result<()> {
+        let key = (pane_id.to_string(), name.to_string());
+        if self.pane_vars.get(&key).map(String::as_str) == Some(value) {
+            return Ok(());
+        }
+        tmux::set_pane_var(pane_id, name, value)?;
+        self.pane_vars.insert(key, value.to_string());
+        Ok(())
+    }
+
+    fn unset_pane_var(&mut self, pane_id: &str, name: &str) -> Result<()> {
+        let key = (pane_id.to_string(), name.to_string());
+        if !self.pane_vars.contains_key(&key) {
+            return Ok(());
+        }
+        tmux::unset_pane_var(pane_id, name)?;
+        self.pane_vars.remove(&key);
+        Ok(())
     }
 
     fn update_pane_borders(&mut self, snapshots: &[PaneSnapshot]) -> Result<()> {
@@ -328,7 +361,12 @@ impl Daemon {
                     tmux::set_pane_var(&pane.id, "@tpane_border", &border)?;
                     self.pane_borders.insert(pane.id.clone(), border);
                 }
-                Ok(_) => {}
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    if self.pane_borders.remove(&pane.id).is_some() {
+                        tmux::unset_pane_var(&pane.id, "@tpane_border")?;
+                    }
+                }
                 Err(error) => {
                     self.record_runtime_error(format!("pane border {}: {error}", pane.id));
                 }
@@ -338,7 +376,18 @@ impl Daemon {
     }
 
     fn apply_status_options(&mut self) -> Result<()> {
-        for (name, value) in self.lua.options() {
+        let next_options = self.lua.options().into_iter().collect::<HashMap<_, _>>();
+        for name in self
+            .options
+            .keys()
+            .filter(|name| !next_options.contains_key(*name))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            tmux::unset_global_var(&name)?;
+            self.options.remove(&name);
+        }
+        for (name, value) in next_options {
             if self.options.get(&name) != Some(&value) {
                 tmux::set_global_var(&name, &value)?;
                 self.options.insert(name, value);
@@ -346,17 +395,29 @@ impl Daemon {
         }
 
         let status = self.lua.status_options();
-        if status.position != self.status_position {
-            if let Some(position) = &status.position {
+        self.apply_status_position_interval(status.position, status.interval)
+    }
+
+    fn apply_status_position_interval(
+        &mut self,
+        position: Option<String>,
+        interval: Option<u64>,
+    ) -> Result<()> {
+        if position != self.status_position {
+            if let Some(position) = &position {
                 tmux::set_status_position(position)?;
+            } else {
+                tmux::unset_global_var("status-position")?;
             }
-            self.status_position = status.position;
+            self.status_position = position;
         }
-        if status.interval != self.status_interval {
-            if let Some(interval) = status.interval {
+        if interval != self.status_interval {
+            if let Some(interval) = interval {
                 tmux::set_status_interval(interval)?;
+            } else {
+                tmux::unset_global_var("status-interval")?;
             }
-            self.status_interval = status.interval;
+            self.status_interval = interval;
         }
         Ok(())
     }
@@ -364,29 +425,28 @@ impl Daemon {
     fn update_statusline(&mut self, current_pane_id: Option<&str>) -> Result<()> {
         let (status, errors) = self.lua.render_statusline(current_pane_id);
         self.record_runtime_errors(errors);
-        if status.position != self.status_position {
-            if let Some(position) = &status.position {
-                tmux::set_status_position(position)?;
+        self.apply_status_position_interval(status.position, status.interval)?;
+        match status.left {
+            Some(left) if left != self.status_left => {
+                tmux::set_status("left", &left)?;
+                self.status_left = left;
             }
-            self.status_position = status.position;
-        }
-        if status.interval != self.status_interval {
-            if let Some(interval) = status.interval {
-                tmux::set_status_interval(interval)?;
+            None if !self.status_left.is_empty() => {
+                tmux::unset_global_var("status-left")?;
+                self.status_left.clear();
             }
-            self.status_interval = status.interval;
+            _ => {}
         }
-        if let Some(left) = status.left
-            && left != self.status_left
-        {
-            tmux::set_status("left", &left)?;
-            self.status_left = left;
-        }
-        if let Some(right) = status.right
-            && right != self.status_right
-        {
-            tmux::set_status("right", &right)?;
-            self.status_right = right;
+        match status.right {
+            Some(right) if right != self.status_right => {
+                tmux::set_status("right", &right)?;
+                self.status_right = right;
+            }
+            None if !self.status_right.is_empty() => {
+                tmux::unset_global_var("status-right")?;
+                self.status_right.clear();
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -489,7 +549,7 @@ impl Daemon {
                 value: value.clone(),
             },
         );
-        tmux::set_pane_var(pane_id, "@tpane_state", &value)?;
+        self.set_pane_var(pane_id, "@tpane_state", &value)?;
         if changed {
             self.record_runtime_errors(self.lua.fire_event_text("state:change", pane_id));
         }
@@ -504,7 +564,7 @@ impl Daemon {
             return;
         }
         mark_record_seen(record);
-        let _ = tmux::set_pane_var(pane_id, "@tpane_state", "idle_seen");
+        let _ = self.set_pane_var(pane_id, "@tpane_state", "idle_seen");
         self.record_runtime_errors(self.lua.fire_event_text("state:change", pane_id));
     }
 
@@ -880,6 +940,7 @@ mod tests {
             status_interval: None,
             options: HashMap::new(),
             pane_borders: HashMap::new(),
+            pane_vars: HashMap::new(),
             config_sig: Vec::new(),
         }
     }

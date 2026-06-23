@@ -204,7 +204,7 @@ Options:
 ```lua
 tag = "logs"              -- defaults to the registered name
 name = "logs"             -- stash name, defaults to the registered name
-dir = "below"             -- below | above | right | left
+side = "bottom"           -- bottom | top | right | left; dir/direction are accepted aliases
 size = "25%"
 full = true               -- split across the full window, not only the current pane
 anchor = { tag = "editor" } -- optional target pane for split/unstash; defaults to the window's non-companion pane
@@ -220,7 +220,7 @@ Use this when you do not need a registered pane:
 
 ```lua
 local logs = tpane.split(pane, {
-  dir = "below",
+  side = "bottom",
   size = "25%",
   full = true,
   command = "zsh",
@@ -339,9 +339,21 @@ formats and styles. Table style keys mirror tmux attributes: `fg`, `bg`, `bold`,
 `dim`, `italics`, `blink`, `reverse`, `hidden`, `strikethrough`, `underscore`,
 `align`, and `fill`.
 
-Built-in widgets: `session`, `clock`, `agents`, `companions`. `agents` shows
-agent panes in the current window by label and groups active/attention states in
-other windows as counts. Raw tmux format strings are also supported.
+Built-in widgets: `session`, `clock`, `agents`, `companions`. `agents` is the
+bundled agent-cockpit plugin: it shows agent panes in the current window by
+label and groups active/attention states in other windows as counts. Raw tmux
+format strings are also supported.
+
+Use `tpane.tabline` for the common window-status format without hand-writing
+nested tmux options:
+
+```lua
+tpane.tabline {
+  label = "cwd", -- "cwd", "name", or any raw tmux format string
+  inactive = { fg = "#777777" },
+  current = { fg = "#8caaee", bold = true },
+}
+```
 
 ## Tmux options
 
@@ -406,6 +418,15 @@ Use `tpane.fmt` for tmux conditionals that do not have Lua equivalents:
 tpane.fmt.prefix("", "")
 tpane.fmt.when("window_zoomed_flag", "Z", "")
 ```
+
+## Public API surface
+
+The intended public Lua surface is: `tpane.kind`, `tpane.state`,
+`tpane.widget`, `tpane.statusline`, `tpane.tabline`, `tpane.options`,
+`tpane.on`, `tpane.command`, `tpane.panel`, `tpane.bind_key`, `tpane.panes`,
+`tpane.find`, `tpane.find_all`, pane objects/handles, reusable pane helpers
+(`register_pane`, `split`, `toggle`, `show`, `hide`, `expand`), `tpane.tmux`,
+`tpane.fmt`, and `tpane.store`.
 
 ## Persistent store
 

@@ -17,6 +17,7 @@ pub fn plugin_dir(name: &str) -> PathBuf {
 fn clone_args(url: &str, dest: &Path) -> Vec<String> {
     vec![
         "clone".to_string(),
+        "--".to_string(),
         url.to_string(),
         dest.display().to_string(),
     ]
@@ -31,11 +32,19 @@ pub fn infer_name(url: &str) -> String {
         .to_string()
 }
 
-pub fn add(url: &str, name: Option<&str>) -> Result<PathBuf> {
-    let name = name.map(str::to_string).unwrap_or_else(|| infer_name(url));
+fn validate_plugin_name(name: &str) -> Result<()> {
     if name.is_empty() || name.contains('/') || name.contains('\\') {
         bail!("invalid plugin name: {name}");
     }
+    Ok(())
+}
+
+pub fn add(url: &str, name: Option<&str>) -> Result<PathBuf> {
+    if url.starts_with('-') {
+        bail!("invalid plugin url: {url}");
+    }
+    let name = name.map(str::to_string).unwrap_or_else(|| infer_name(url));
+    validate_plugin_name(&name)?;
     let dest = plugin_dir(&name);
     if dest.exists() {
         bail!("plugin already exists: {name}");
@@ -74,6 +83,7 @@ pub fn list() -> Result<Vec<String>> {
 }
 
 pub fn remove(name: &str) -> Result<()> {
+    validate_plugin_name(name)?;
     let dir = plugin_dir(name);
     if !dir.exists() {
         bail!("unknown plugin: {name}");
@@ -95,8 +105,16 @@ mod tests {
     fn clone_args_match_git_clone_shape() {
         assert_eq!(
             clone_args("https://example.test/me/foo.git", Path::new("/tmp/foo")),
-            vec!["clone", "https://example.test/me/foo.git", "/tmp/foo"]
+            vec!["clone", "--", "https://example.test/me/foo.git", "/tmp/foo"]
         );
+    }
+
+    #[test]
+    fn plugin_names_reject_paths() {
+        assert!(validate_plugin_name("foo").is_ok());
+        assert!(validate_plugin_name("").is_err());
+        assert!(validate_plugin_name("../foo").is_err());
+        assert!(validate_plugin_name("foo\\bar").is_err());
     }
 
     #[test]

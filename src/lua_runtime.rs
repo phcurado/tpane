@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -148,6 +148,7 @@ impl LuaRuntime {
         };
         runtime.install_api()?;
         runtime.load_prelude()?;
+        runtime.load_builtin_agents()?;
         Ok(runtime)
     }
 
@@ -453,6 +454,11 @@ impl LuaRuntime {
     fn load_prelude(&self) -> Result<()> {
         self.load_source("prelude.lua", PRELUDE)
             .map_err(|error| anyhow!("failed to load Lua prelude: {error}"))
+    }
+
+    fn load_builtin_agents(&self) -> Result<()> {
+        self.load_source("builtin-agents.lua", BUILTIN_AGENTS)
+            .map_err(|error| anyhow!("failed to load built-in agent Lua plugin: {error}"))
     }
 
     pub fn load_builtins(&self) -> Result<()> {
@@ -1314,6 +1320,10 @@ fn json_to_lua(lua: &Lua, value: &JsonValue) -> mlua::Result<Value> {
 }
 
 fn lua_to_json(value: Value) -> mlua::Result<JsonValue> {
+    lua_to_json_seen(value, &mut HashSet::new())
+}
+
+fn lua_to_json_seen(value: Value, seen: &mut HashSet<usize>) -> mlua::Result<JsonValue> {
     match value {
         Value::Nil => Ok(JsonValue::Null),
         Value::Boolean(value) => Ok(JsonValue::Bool(value)),
@@ -1322,54 +1332,66 @@ fn lua_to_json(value: Value) -> mlua::Result<JsonValue> {
             .map(JsonValue::Number)
             .ok_or_else(|| mlua::Error::RuntimeError("cannot store non-finite number".to_string())),
         Value::String(value) => Ok(JsonValue::String(value.to_string_lossy())),
-        Value::Table(table) => lua_table_to_json(table),
+        Value::Table(table) => lua_table_to_json(table, seen),
         other => Err(mlua::Error::RuntimeError(format!(
             "cannot store Lua value: {other:?}"
         ))),
     }
 }
 
-fn lua_table_to_json(table: Table) -> mlua::Result<JsonValue> {
-    let mut array_values: Vec<(usize, JsonValue)> = Vec::new();
-    let mut object = JsonMap::new();
-    let mut array_like = true;
+fn lua_table_to_json(table: Table, seen: &mut HashSet<usize>) -> mlua::Result<JsonValue> {
+    let pointer = table.to_pointer() as usize;
+    if !seen.insert(pointer) {
+        return Err(mlua::Error::RuntimeError(
+            "cannot store recursive table".to_string(),
+        ));
+    }
 
-    for pair in table.pairs::<Value, Value>() {
-        let (key, value) = pair?;
-        let value = lua_to_json(value)?;
-        match key {
-            Value::Integer(index) if index > 0 => {
-                array_values.push((index as usize, value));
-            }
-            Value::String(key) => {
-                array_like = false;
-                object.insert(key.to_string_lossy(), value);
-            }
-            other => {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "cannot store table key: {other:?}"
-                )));
+    let result = (|| {
+        let mut array_values: Vec<(usize, JsonValue)> = Vec::new();
+        let mut object = JsonMap::new();
+        let mut array_like = true;
+
+        for pair in table.pairs::<Value, Value>() {
+            let (key, value) = pair?;
+            let value = lua_to_json_seen(value, seen)?;
+            match key {
+                Value::Integer(index) if index > 0 => {
+                    array_values.push((index as usize, value));
+                }
+                Value::String(key) => {
+                    array_like = false;
+                    object.insert(key.to_string_lossy(), value);
+                }
+                other => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "cannot store table key: {other:?}"
+                    )));
+                }
             }
         }
-    }
 
-    if array_like {
-        array_values.sort_by_key(|(idx, _)| *idx);
-        if array_values
-            .iter()
-            .enumerate()
-            .all(|(offset, (idx, _))| *idx == offset + 1)
-        {
-            return Ok(JsonValue::Array(
-                array_values.into_iter().map(|(_, value)| value).collect(),
-            ));
+        if array_like {
+            array_values.sort_by_key(|(idx, _)| *idx);
+            if array_values
+                .iter()
+                .enumerate()
+                .all(|(offset, (idx, _))| *idx == offset + 1)
+            {
+                return Ok(JsonValue::Array(
+                    array_values.into_iter().map(|(_, value)| value).collect(),
+                ));
+            }
         }
-    }
 
-    for (idx, value) in array_values {
-        object.insert(idx.to_string(), value);
-    }
-    Ok(JsonValue::Object(object))
+        for (idx, value) in array_values {
+            object.insert(idx.to_string(), value);
+        }
+        Ok(JsonValue::Object(object))
+    })();
+
+    seen.remove(&pointer);
+    result
 }
 
 fn tmux_api(lua: &Lua) -> Result<Table> {
@@ -1611,8 +1633,10 @@ fn split_direction(dir: &str) -> mlua::Result<(tmux::SplitDirection, bool)> {
     match dir {
         "right" | "h" | "horizontal" => Ok((tmux::SplitDirection::Horizontal, false)),
         "left" => Ok((tmux::SplitDirection::Horizontal, true)),
-        "below" | "down" | "v" | "vertical" => Ok((tmux::SplitDirection::Vertical, false)),
-        "above" | "up" => Ok((tmux::SplitDirection::Vertical, true)),
+        "below" | "bottom" | "down" | "v" | "vertical" => {
+            Ok((tmux::SplitDirection::Vertical, false))
+        }
+        "above" | "top" | "up" => Ok((tmux::SplitDirection::Vertical, true)),
         other => Err(mlua::Error::RuntimeError(format!(
             "unknown split dir: {other}"
         ))),
@@ -1786,6 +1810,8 @@ fn basename(path: &str) -> String {
 
 const PRELUDE: &str = include_str!("lua/prelude.lua");
 
+const BUILTIN_AGENTS: &str = include_str!("lua/builtin_agents.lua");
+
 const BUILTIN_KINDS: &str = include_str!("lua/builtin_kinds.lua");
 
 #[cfg(test)]
@@ -1851,7 +1877,15 @@ mod tests {
             (tmux::SplitDirection::Vertical, false)
         ));
         assert!(matches!(
+            split_direction("bottom").unwrap(),
+            (tmux::SplitDirection::Vertical, false)
+        ));
+        assert!(matches!(
             split_direction("above").unwrap(),
+            (tmux::SplitDirection::Vertical, true)
+        ));
+        assert!(matches!(
+            split_direction("top").unwrap(),
             (tmux::SplitDirection::Vertical, true)
         ));
         assert!(matches!(
@@ -2037,6 +2071,28 @@ mod tests {
     }
 
     #[test]
+    fn store_rejects_recursive_lua_tables() {
+        let panes = Rc::new(RefCell::new(Vec::new()));
+        let store = Rc::new(RefCell::new(Store::memory()));
+        let runtime = LuaRuntime::with_store(panes, store).unwrap();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.command("write", function()
+                  local value = {}
+                  value.self = value
+                  tpane.store.set("cycle", value)
+                end)
+                "#,
+            )
+            .unwrap();
+
+        let error = runtime.run_command("write", &[]).unwrap_err().to_string();
+        assert!(error.contains("cannot store recursive table"));
+    }
+
+    #[test]
     fn workspace_registers_declarative_layout() {
         let (runtime, _) = runtime();
         runtime
@@ -2202,6 +2258,37 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn tabline_helper_sets_window_status_formats() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r##"
+                tpane.tabline{
+                  label = "cwd",
+                  inactive = { fg = "#777777" },
+                  current = { fg = "#c6d0f5", bg = "#232634", bold = true },
+                }
+                "##,
+            )
+            .unwrap();
+
+        let options = runtime.options();
+        assert!(
+            options.contains(&(
+                "window-status-format".to_string(),
+                "#[fg=#777777]#I:#(pwd=\"#{pane_current_path}\"; echo ${pwd####*/})#[default]"
+                    .to_string(),
+            ))
+        );
+        assert!(options.contains(&(
+            "window-status-current-format".to_string(),
+            "#[fg=#c6d0f5,bg=#232634,bold]#I:#(pwd=\"#{pane_current_path}\"; echo ${pwd####*/})#[default]"
+                .to_string(),
+        )));
     }
 
     #[test]

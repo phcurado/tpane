@@ -187,6 +187,10 @@ pub fn set_global_var(name: &str, value: &str) -> Result<()> {
     tmux(&["set-option", "-g", name, value]).map(|_| ())
 }
 
+pub fn unset_global_var(name: &str) -> Result<()> {
+    tmux(&["set-option", "-gu", name]).map(|_| ())
+}
+
 pub fn set_status(slot: &str, value: &str) -> Result<()> {
     tmux_owned(set_status_args(slot, value)).map(|_| ())
 }
