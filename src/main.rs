@@ -7,7 +7,7 @@ mod store;
 mod tmux;
 
 use std::cell::RefCell;
-use std::collections::{HashSet, hash_map::DefaultHasher};
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -92,6 +92,8 @@ enum Commands {
 enum PluginCommand {
     /// List installed plugins.
     List,
+    /// Show plugin install, lock, and reference status.
+    Status,
     /// Install missing referenced plugins and update referenced plugins.
     Sync,
     /// Update one plugin, or all plugins when no name is given.
@@ -230,7 +232,7 @@ fn print_response(response: Response) -> Result<()> {
     }
 }
 
-fn referenced_plugins(load_plugins: bool) -> Result<HashSet<String>> {
+fn referenced_plugin_specs(load_plugins: bool) -> Result<HashMap<String, plugins::PluginSpec>> {
     let panes = Rc::new(RefCell::new(Vec::new()));
     let runtime = if load_plugins {
         lua_runtime::LuaRuntime::new(panes)?
@@ -244,7 +246,49 @@ fn referenced_plugins(load_plugins: bool) -> Result<HashSet<String>> {
             .load_source(&path.display().to_string(), &source)
             .with_context(|| format!("failed to load {}", path.display()))?;
     }
-    Ok(runtime.used_plugins())
+    Ok(runtime.used_plugin_specs())
+}
+
+fn referenced_plugins(load_plugins: bool) -> Result<HashSet<String>> {
+    Ok(referenced_plugin_specs(load_plugins)?.into_keys().collect())
+}
+
+fn plugin_status_line(status: &plugins::PluginStatus) -> String {
+    let ref_name = status
+        .branch
+        .as_ref()
+        .map(|branch| format!("branch={branch}"))
+        .or_else(|| status.tag.as_ref().map(|tag| format!("tag={tag}")))
+        .or_else(|| status.rev.as_ref().map(|rev| format!("rev={rev}")))
+        .unwrap_or_else(|| "ref=default".to_string());
+    let installed = if status.installed {
+        "installed"
+    } else if status.url.is_none() && status.name == "agents" {
+        "packaged"
+    } else {
+        "missing"
+    };
+    let referenced = if status.referenced {
+        "referenced"
+    } else {
+        "unreferenced"
+    };
+    let dirty = status
+        .dirty
+        .map(|dirty| if dirty { "dirty" } else { "clean" })
+        .unwrap_or("-");
+    let update = status
+        .update_available
+        .map(|available| if available { "update" } else { "current" })
+        .unwrap_or("-");
+    let current = status.current.as_deref().unwrap_or("-");
+    let locked = status.locked.as_deref().unwrap_or("-");
+    let url = status.url.as_deref().unwrap_or("packaged/local");
+    let path = status.path.as_deref().unwrap_or(".");
+    format!(
+        "{}\t{}\t{}\t{}\t{}\tpath={}\tcurrent={}\tlocked={}\t{}\t{}",
+        status.name, referenced, installed, url, ref_name, path, current, locked, dirty, update
+    )
 }
 
 fn plugin(command: PluginCommand) -> Result<()> {
@@ -255,13 +299,15 @@ fn plugin(command: PluginCommand) -> Result<()> {
             }
             Ok(())
         }
+        PluginCommand::Status => {
+            for status in plugins::status(&referenced_plugin_specs(false)?)? {
+                println!("{}", plugin_status_line(&status));
+            }
+            Ok(())
+        }
         PluginCommand::Sync => {
-            for name in referenced_plugins(true)? {
-                if plugins::plugin_dir(&name).exists() {
-                    for name in plugins::update(Some(&name))? {
-                        println!("synced {name}");
-                    }
-                }
+            for name in plugins::sync(&referenced_plugin_specs(true)?)? {
+                println!("synced {name}");
             }
             let _ = print_response(request(Request::Reload)?);
             Ok(())
@@ -776,6 +822,17 @@ mod tests {
             cli.command,
             Some(Commands::Plugin {
                 command: PluginCommand::Sync
+            })
+        ));
+    }
+
+    #[test]
+    fn plugin_status_parses_as_builtin_command() {
+        let cli = Cli::try_parse_from(["tpane", "plugin", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Plugin {
+                command: PluginCommand::Status
             })
         ));
     }

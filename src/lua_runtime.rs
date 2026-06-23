@@ -29,7 +29,7 @@ pub struct LuaRuntime {
     states: Rc<RefCell<HashMap<String, StatePresentation>>>,
     statusline: Rc<RefCell<Option<StatusLineDef>>>,
     options: Rc<RefCell<Vec<(String, String)>>>,
-    used_plugins: Rc<RefCell<HashSet<String>>>,
+    used_plugins: Rc<RefCell<HashMap<String, PluginSpec>>>,
     load_plugins: bool,
     panes: Rc<RefCell<Vec<PaneSnapshot>>>,
     store: Rc<RefCell<Store>>,
@@ -145,7 +145,7 @@ impl LuaRuntime {
         let states = Rc::new(RefCell::new(HashMap::new()));
         let statusline = Rc::new(RefCell::new(None));
         let options = Rc::new(RefCell::new(Vec::new()));
-        let used_plugins = Rc::new(RefCell::new(HashSet::new()));
+        let used_plugins = Rc::new(RefCell::new(HashMap::new()));
         let runtime = Self {
             lua,
             kinds,
@@ -243,7 +243,7 @@ impl LuaRuntime {
                         ));
                     }
                 };
-                if use_plugin_loaded.borrow().contains(&name) {
+                if use_plugin_loaded.borrow().contains_key(&name) {
                     return Ok(());
                 }
                 if load_plugins {
@@ -252,7 +252,7 @@ impl LuaRuntime {
                     plugins::validate_plugin_name(&name).map_err(mlua_external)?;
                     plugins::validate_spec(&spec).map_err(mlua_external)?;
                 }
-                use_plugin_loaded.borrow_mut().insert(name);
+                use_plugin_loaded.borrow_mut().insert(name, spec);
                 Ok(())
             })
             .map_err(lua_err)?;
@@ -517,7 +517,7 @@ impl LuaRuntime {
         self.keybinds.borrow().clone()
     }
 
-    pub fn used_plugins(&self) -> HashSet<String> {
+    pub fn used_plugin_specs(&self) -> HashMap<String, PluginSpec> {
         self.used_plugins.borrow().clone()
     }
 
@@ -1285,6 +1285,9 @@ fn load_plugin(lua: &Lua, name: &str, spec: &PluginSpec) -> mlua::Result<()> {
     let entrypoint = plugins::entrypoint(name, spec).map_err(mlua_external)?;
     if entrypoint.is_file() {
         let source = fs::read_to_string(&entrypoint).map_err(mlua::Error::external)?;
+        if let Some(dir) = entrypoint.parent() {
+            prepend_package_path(lua, dir)?;
+        }
         return lua
             .load(&source)
             .set_name(entrypoint.display().to_string())
@@ -1298,6 +1301,19 @@ fn load_plugin(lua: &Lua, name: &str, spec: &PluginSpec) -> mlua::Result<()> {
             .exec(),
         _ => Err(mlua::Error::RuntimeError(format!("unknown plugin: {name}"))),
     }
+}
+
+fn prepend_package_path(lua: &Lua, dir: &Path) -> mlua::Result<()> {
+    let package: Table = lua.globals().get("package")?;
+    let current = package.get::<String>("path").unwrap_or_default();
+    let dir = dir.display().to_string();
+    let paths = [format!("{dir}/?.lua"), format!("{dir}/?/init.lua")].join(";");
+    let next = if current.is_empty() {
+        paths
+    } else {
+        format!("{paths};{current}")
+    };
+    package.set("path", next)
 }
 
 fn install_package_path(lua: &Lua) -> Result<()> {
@@ -2075,6 +2091,42 @@ mod tests {
             runtime.run_command("check", &[]).unwrap().as_deref(),
             Some("%1:agent:agent")
         );
+    }
+
+    #[test]
+    fn collector_records_plugin_specs_without_loading_plugins() {
+        let panes = Rc::new(RefCell::new(Vec::new()));
+        let runtime = LuaRuntime::collector(panes).unwrap();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.use("foo", { repo = "https://example.test/foo.git", branch = "main", path = "plugins/foo" })
+                "#,
+            )
+            .unwrap();
+
+        let specs = runtime.used_plugin_specs();
+        let spec = specs.get("foo").unwrap();
+        assert_eq!(spec.url.as_deref(), Some("https://example.test/foo.git"));
+        assert_eq!(spec.branch.as_deref(), Some("main"));
+        assert_eq!(spec.path.as_deref(), Some("plugins/foo"));
+    }
+
+    #[test]
+    fn plugin_specs_reject_conflicting_repo_aliases() {
+        let panes = Rc::new(RefCell::new(Vec::new()));
+        let runtime = LuaRuntime::collector(panes).unwrap();
+        let error = runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.use("foo", { repo = "https://example.test/a.git", url = "https://example.test/b.git" })
+                "#,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("plugin spec cannot set different url and repo values"));
     }
 
     #[test]

@@ -322,6 +322,7 @@ before loading it.
 Plugin commands are for maintenance; installation normally comes from `tpane.use`:
 
 ```sh
+tpane plugin status
 tpane plugin sync # install/update plugins referenced by config
 tpane plugin update foo
 tpane plugin update

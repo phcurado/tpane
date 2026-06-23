@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,6 +20,42 @@ pub struct PluginSpec {
     pub path: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginLock {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub commit: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Lockfile {
+    plugins: BTreeMap<String, PluginLock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginStatus {
+    pub name: String,
+    pub referenced: bool,
+    pub installed: bool,
+    pub url: Option<String>,
+    pub branch: Option<String>,
+    pub tag: Option<String>,
+    pub rev: Option<String>,
+    pub path: Option<String>,
+    pub current: Option<String>,
+    pub locked: Option<String>,
+    pub dirty: Option<bool>,
+    pub update_available: Option<bool>,
+}
+
 pub fn plugin_root() -> PathBuf {
     data_dir().join("plugins")
 }
@@ -31,6 +68,20 @@ fn data_dir() -> PathBuf {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share/tpane"))
         })
         .unwrap_or_else(|| PathBuf::from(".local/share/tpane"))
+}
+
+fn config_dir() -> PathBuf {
+    std::env::var_os("TPANE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("XDG_CONFIG_HOME").map(|home| PathBuf::from(home).join("tpane"))
+        })
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/tpane")))
+        .unwrap_or_else(|| PathBuf::from(".config/tpane"))
+}
+
+pub fn lockfile_path() -> PathBuf {
+    config_dir().join("tpane-lock.json")
 }
 
 pub fn plugin_dir(name: &str) -> PathBuf {
@@ -175,13 +226,17 @@ pub fn add(url: &str, name: Option<&str>, mut spec: PluginSpec) -> Result<PathBu
     if !status.success() {
         bail!("git clone failed for {url}");
     }
-    if let Some(tag) = &spec.tag {
+
+    if let Some(commit) = locked_commit(&name, &spec)? {
+        checkout(&dest, &commit)?;
+    } else if let Some(tag) = &spec.tag {
         checkout(&dest, tag)?;
-    }
-    if let Some(rev) = &spec.rev {
+    } else if let Some(rev) = &spec.rev {
         checkout(&dest, rev)?;
     }
+
     write_metadata(&name, &spec)?;
+    write_lock_entry(&name, &spec, &current_commit(&dest)?)?;
     Ok(dest)
 }
 
@@ -210,10 +265,11 @@ pub fn remove(name: &str) -> Result<()> {
     if !dir.exists() {
         bail!("unknown plugin: {name}");
     }
-    fs::remove_dir_all(&dir).with_context(|| format!("failed to remove {}", dir.display()))
+    fs::remove_dir_all(&dir).with_context(|| format!("failed to remove {}", dir.display()))?;
+    remove_lock_entry(name)
 }
 
-pub fn clean(keep: &std::collections::HashSet<String>) -> Result<Vec<String>> {
+pub fn clean(keep: &HashSet<String>) -> Result<Vec<String>> {
     let mut removed = Vec::new();
     for name in list()? {
         if !keep.contains(&name) {
@@ -222,6 +278,25 @@ pub fn clean(keep: &std::collections::HashSet<String>) -> Result<Vec<String>> {
         }
     }
     Ok(removed)
+}
+
+pub fn sync(specs: &HashMap<String, PluginSpec>) -> Result<Vec<String>> {
+    let mut synced = Vec::new();
+    let mut names = specs.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+    for name in names {
+        let spec = specs.get(&name).expect("name came from specs");
+        validate_plugin_name(&name)?;
+        validate_spec(spec)?;
+        if plugin_dir(&name).exists() {
+            update_one_with_spec(&name, spec)?;
+            synced.push(name);
+        } else if spec.url.is_some() {
+            ensure(&name, spec)?;
+            synced.push(name);
+        }
+    }
+    Ok(synced)
 }
 
 pub fn update(name: Option<&str>) -> Result<Vec<String>> {
@@ -240,29 +315,89 @@ pub fn update(name: Option<&str>) -> Result<Vec<String>> {
     Ok(updated)
 }
 
+pub fn status(specs: &HashMap<String, PluginSpec>) -> Result<Vec<PluginStatus>> {
+    let mut names = list()?.into_iter().collect::<HashSet<_>>();
+    names.extend(specs.keys().cloned());
+    let mut names = names.into_iter().collect::<Vec<_>>();
+    names.sort();
+
+    names
+        .into_iter()
+        .map(|name| {
+            let referenced = specs.contains_key(&name);
+            let installed = plugin_dir(&name).exists();
+            let spec = specs
+                .get(&name)
+                .cloned()
+                .or_else(|| read_metadata(&name).ok())
+                .unwrap_or_default();
+            let lock = read_lockfile()?.plugins.remove(&name);
+            let current = installed
+                .then(|| current_commit(&plugin_dir(&name)))
+                .transpose()?;
+            let dirty = installed.then(|| dirty(&plugin_dir(&name))).transpose()?;
+            let update_available = if installed {
+                update_available(&plugin_dir(&name), &spec, current.as_deref())?
+            } else {
+                None
+            };
+            Ok(PluginStatus {
+                name,
+                referenced,
+                installed,
+                url: spec.url,
+                branch: spec.branch,
+                tag: spec.tag,
+                rev: spec.rev,
+                path: spec.path,
+                current,
+                locked: lock.map(|lock| lock.commit),
+                dirty,
+                update_available,
+            })
+        })
+        .collect()
+}
+
 fn update_one(name: &str) -> Result<()> {
     let spec = read_metadata(name)?;
+    update_one_with_spec(name, &spec)
+}
+
+fn update_one_with_spec(name: &str, spec: &PluginSpec) -> Result<()> {
     let dir = plugin_dir(name);
     if !dir.exists() {
         bail!("unknown plugin: {name}");
     }
-    if let Some(branch) = &spec.branch {
-        git(&dir, ["fetch", "origin", branch])?;
-        git(&dir, ["checkout", branch])?;
-        git(&dir, ["merge", "--ff-only", &format!("origin/{branch}")])?;
-    } else if let Some(tag) = &spec.tag {
-        git(&dir, ["fetch", "--tags", "origin"])?;
-        git(&dir, ["checkout", tag])?;
-    } else if let Some(rev) = &spec.rev {
-        git(&dir, ["fetch", "origin"])?;
-        git(&dir, ["checkout", "--detach", rev])?;
-    } else {
-        git(&dir, ["pull", "--ff-only"])?;
+    if let Some(metadata) = read_metadata(name).ok()
+        && spec.url.is_some()
+        && metadata.url != spec.url
+    {
+        bail!("plugin {name} is installed with a different url");
     }
-    Ok(())
+
+    if let Some(branch) = &spec.branch {
+        git(&dir, &["fetch", "origin", branch])?;
+        git(
+            &dir,
+            &["checkout", "-B", branch, &format!("origin/{branch}")],
+        )?;
+    } else if let Some(tag) = &spec.tag {
+        git(&dir, &["fetch", "--tags", "origin"])?;
+        checkout(&dir, tag)?;
+    } else if let Some(rev) = &spec.rev {
+        git(&dir, &["fetch", "origin"])?;
+        checkout(&dir, rev)?;
+    } else {
+        git(&dir, &["pull", "--ff-only"])?;
+    }
+
+    write_metadata(name, spec)?;
+    write_lock_entry(name, spec, &current_commit(&dir)?)
 }
 
 fn checkout(dir: &Path, rev: &str) -> Result<()> {
+    validate_ref("rev", rev)?;
     let status = Command::new("git")
         .current_dir(dir)
         .args(checkout_args(rev))
@@ -274,7 +409,7 @@ fn checkout(dir: &Path, rev: &str) -> Result<()> {
     Ok(())
 }
 
-fn git<const N: usize>(dir: &Path, args: [&str; N]) -> Result<()> {
+fn git(dir: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new("git")
         .current_dir(dir)
         .args(args)
@@ -284,6 +419,34 @@ fn git<const N: usize>(dir: &Path, args: [&str; N]) -> Result<()> {
         bail!("git command failed in {}", dir.display());
     }
     Ok(())
+}
+
+fn git_output(dir: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run git in {}", dir.display()))?;
+    if !output.status.success() {
+        bail!("git command failed in {}", dir.display());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn current_commit(dir: &Path) -> Result<String> {
+    git_output(dir, &["rev-parse", "HEAD"])
+}
+
+fn dirty(dir: &Path) -> Result<bool> {
+    Ok(!git_output(dir, &["status", "--porcelain"])?.is_empty())
+}
+
+fn update_available(dir: &Path, spec: &PluginSpec, current: Option<&str>) -> Result<Option<bool>> {
+    let Some(branch) = &spec.branch else {
+        return Ok(None);
+    };
+    let remote = git_output(dir, &["rev-parse", "--verify", &format!("origin/{branch}")])?;
+    Ok(current.map(|current| current != remote))
 }
 
 pub fn entrypoint(name: &str, spec: &PluginSpec) -> Result<PathBuf> {
@@ -318,19 +481,27 @@ pub fn assert_compatible(name: &str, requested: &PluginSpec) -> Result<()> {
     if requested.url.is_some() && requested.url != installed.url {
         bail!("plugin {name} is not installed with requested url");
     }
-    if requested.branch.is_some() && requested.branch != installed.branch {
-        bail!("plugin {name} is not installed with requested branch");
-    }
-    if requested.tag.is_some() && requested.tag != installed.tag {
-        bail!("plugin {name} is not installed with requested tag");
-    }
-    if requested.rev.is_some() && requested.rev != installed.rev {
-        bail!("plugin {name} is not installed with requested rev");
-    }
-    if requested.path.is_some() && requested.path != installed.path {
-        bail!("plugin {name} is not installed with requested path");
-    }
     Ok(())
+}
+
+fn locked_commit(name: &str, spec: &PluginSpec) -> Result<Option<String>> {
+    let Some(lock) = read_lockfile()?.plugins.remove(name) else {
+        return Ok(None);
+    };
+    if lock_matches_spec(&lock, spec) {
+        validate_ref("locked commit", &lock.commit)?;
+        Ok(Some(lock.commit))
+    } else {
+        Ok(None)
+    }
+}
+
+fn lock_matches_spec(lock: &PluginLock, spec: &PluginSpec) -> bool {
+    (spec.url.is_none() || spec.url == lock.url)
+        && (spec.branch.is_none() || spec.branch == lock.branch)
+        && (spec.tag.is_none() || spec.tag == lock.tag)
+        && (spec.rev.is_none() || spec.rev == lock.rev)
+        && (spec.path.is_none() || spec.path == lock.path)
 }
 
 fn read_metadata(name: &str) -> Result<PluginSpec> {
@@ -344,6 +515,51 @@ fn write_metadata(name: &str, spec: &PluginSpec) -> Result<()> {
     let path = metadata_path(name);
     let source = serde_json::to_string_pretty(spec)?;
     fs::write(&path, source).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn read_lockfile() -> Result<Lockfile> {
+    let path = lockfile_path();
+    if !path.exists() {
+        return Ok(Lockfile::default());
+    }
+    let source =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&source).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn write_lockfile(lockfile: &Lockfile) -> Result<()> {
+    let path = lockfile_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let source = serde_json::to_string_pretty(lockfile)?;
+    fs::write(&path, format!("{source}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_lock_entry(name: &str, spec: &PluginSpec, commit: &str) -> Result<()> {
+    let mut lockfile = read_lockfile()?;
+    lockfile.plugins.insert(
+        name.to_string(),
+        PluginLock {
+            url: spec.url.clone(),
+            branch: spec.branch.clone(),
+            tag: spec.tag.clone(),
+            rev: spec.rev.clone(),
+            path: spec.path.clone(),
+            commit: commit.to_string(),
+        },
+    );
+    write_lockfile(&lockfile)
+}
+
+fn remove_lock_entry(name: &str) -> Result<()> {
+    let mut lockfile = read_lockfile()?;
+    if lockfile.plugins.remove(name).is_some() {
+        write_lockfile(&lockfile)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -433,6 +649,33 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn lock_matches_requested_spec_fields() {
+        let lock = PluginLock {
+            url: Some("https://example.test/foo.git".to_string()),
+            branch: Some("main".to_string()),
+            path: Some("plugins/foo".to_string()),
+            commit: "abc123".to_string(),
+            ..PluginLock::default()
+        };
+        assert!(lock_matches_spec(
+            &lock,
+            &PluginSpec {
+                url: Some("https://example.test/foo.git".to_string()),
+                branch: Some("main".to_string()),
+                path: Some("plugins/foo".to_string()),
+                ..PluginSpec::default()
+            },
+        ));
+        assert!(!lock_matches_spec(
+            &lock,
+            &PluginSpec {
+                branch: Some("dev".to_string()),
+                ..PluginSpec::default()
+            },
+        ));
     }
 
     #[test]

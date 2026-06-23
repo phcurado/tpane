@@ -116,6 +116,7 @@ tpane.use("local", { repo = "https://github.com/example/mono.git", rev = "abc123
 ```
 
 ```sh
+tpane plugin status
 tpane plugin sync # install/update plugins referenced by config
 tpane plugin update foo # update one installed plugin
 tpane plugin update # update all installed plugins
