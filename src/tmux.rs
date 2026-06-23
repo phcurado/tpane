@@ -17,10 +17,6 @@ pub struct PaneInfo {
     pub state: Option<String>,
 }
 
-pub fn start_server() -> Result<()> {
-    tmux(&["start-server"]).map(|_| ())
-}
-
 pub fn has_session(name: &str) -> bool {
     Command::new("tmux")
         .args(["has-session", "-t", name])
@@ -30,30 +26,6 @@ pub fn has_session(name: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
-}
-
-pub fn attach_session(name: &str) -> Result<()> {
-    let status = Command::new("tmux")
-        .args(["attach-session", "-t", name])
-        .status()
-        .context("failed to exec tmux attach-session")?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("tmux attach-session failed")
-    }
-}
-
-pub fn new_session(name: &str) -> Result<()> {
-    let status = Command::new("tmux")
-        .args(["new-session", "-s", name])
-        .status()
-        .context("failed to exec tmux new-session")?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("tmux new-session failed")
-    }
 }
 
 pub fn install_render_options() -> Result<()> {

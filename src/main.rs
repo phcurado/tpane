@@ -136,21 +136,12 @@ fn main() -> Result<()> {
 }
 
 fn launch() -> Result<()> {
-    if env::var_os("TMUX").is_some() {
-        tmux::install_render_options()?;
-        ensure_daemon()?;
-        return Ok(());
+    if env::var_os("TMUX").is_none() {
+        bail!("tpane must be run from tmux. Add this to tmux.conf: run-shell -b 'tpane'");
     }
 
-    tmux::start_server()?;
     tmux::install_render_options()?;
-    ensure_daemon()?;
-
-    if tmux::has_session("tpane") {
-        tmux::attach_session("tpane")
-    } else {
-        tmux::new_session("tpane")
-    }
+    ensure_daemon()
 }
 
 fn ensure_daemon() -> Result<()> {
