@@ -1442,10 +1442,6 @@ fn load_plugin(lua: &Lua, name: &str, spec: &PluginSpec) -> mlua::Result<()> {
     }
 
     match name {
-        "agents" => lua
-            .load(BUILTIN_PLUGIN_AGENTS)
-            .set_name("builtin/plugins/agents/init.lua")
-            .exec(),
         "vim-navigator" => lua
             .load(BUILTIN_PLUGIN_VIM_NAVIGATOR)
             .set_name("builtin/plugins/vim-navigator/init.lua")
@@ -2066,7 +2062,6 @@ fn basename(path: &str) -> String {
 
 const PRELUDE: &str = include_str!("lua/prelude.lua");
 
-const BUILTIN_PLUGIN_AGENTS: &str = include_str!("../plugins/agents/init.lua");
 const BUILTIN_PLUGIN_VIM_NAVIGATOR: &str = include_str!("../plugins/vim-navigator/init.lua");
 const BUILTIN_PLUGIN_YANK: &str = include_str!("../plugins/yank/init.lua");
 
@@ -2724,60 +2719,6 @@ mod tests {
         assert_eq!(
             status.right.as_deref(),
             Some("#[fg=magenta]?#[default] logs")
-        );
-    }
-
-    #[test]
-    fn agents_widget_shows_compact_agent_states() {
-        let (runtime, panes) = runtime();
-        let mut pi = pane("%1");
-        pi.tag = Some("agent".to_string());
-        pi.label = "pi".to_string();
-        pi.state = Some("working".to_string());
-        panes.borrow_mut().push(pi);
-
-        let mut claude = pane("%2");
-        claude.tag = Some("agent".to_string());
-        claude.label = "claude".to_string();
-        claude.state = Some("approval".to_string());
-        panes.borrow_mut().push(claude);
-
-        let mut idle = pane("%4");
-        idle.tag = Some("agent".to_string());
-        idle.label = "idle".to_string();
-        idle.state = Some("idle_seen".to_string());
-        panes.borrow_mut().push(idle);
-
-        let mut codex = pane("%3");
-        codex.kind = "codex".to_string();
-        codex.label = "codex".to_string();
-        codex.state = Some("done_unseen".to_string());
-        codex.window = "@2".to_string();
-        codex.home = Some("@2".to_string());
-        panes.borrow_mut().push(codex);
-
-        runtime
-            .load_source(
-                "plugins/agents/init.lua",
-                include_str!("../plugins/agents/init.lua"),
-            )
-            .unwrap();
-        runtime
-            .load_source(
-                "test.lua",
-                r#"
-                tpane.statusline { right = { "agents" } }
-                "#,
-            )
-            .unwrap();
-
-        let (status, errors) = runtime.render_statusline(Some("%1"));
-        assert!(errors.is_empty());
-        assert_eq!(
-            status.right.as_deref(),
-            Some(
-                "#[fg=yellow]#[default] pi  #[fg=yellow]#[default] claude  idle  |  #[fg=blue]1#[default]"
-            )
         );
     }
 

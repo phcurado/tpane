@@ -260,7 +260,6 @@ Built-in plugins:
 ```lua
 tpane.use("vim-navigator")
 tpane.use("yank")
-tpane.use("agents")
 ```
 
 Git plugins:

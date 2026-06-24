@@ -313,11 +313,7 @@ impl Daemon {
                 } else {
                     self.unset_pane_var(&pane.id, "@tpane_color")?;
                 }
-                if pane.tag.is_none()
-                    && let Some(tag) = &detection.tag
-                {
-                    self.set_pane_var(&pane.id, "@tpane_tag", tag)?;
-                }
+                let tag = self.update_pane_tag(&pane, detection.tag.as_deref())?;
                 let state = detection
                     .raw_state
                     .as_deref()
@@ -337,7 +333,7 @@ impl Daemon {
                     window: pane.window.clone(),
                     active: pane.active,
                     zoomed: pane.zoomed,
-                    tag: pane.tag.clone().or(detection.tag.clone()),
+                    tag,
                     home: pane.home.clone(),
                     state,
                     processes: proc_tree,
@@ -369,6 +365,36 @@ impl Daemon {
         self.update_statusline(current_pane_id.as_deref())?;
         self.store.borrow_mut().flush()?;
         Ok(count)
+    }
+
+    fn update_pane_tag(
+        &mut self,
+        pane: &tmux::PaneInfo,
+        detected: Option<&str>,
+    ) -> Result<Option<String>> {
+        let key = (pane.id.clone(), "@tpane_tag".to_string());
+        match detected {
+            Some(tag) => {
+                if pane.tag.as_deref() != Some(tag) {
+                    self.set_pane_var(&pane.id, "@tpane_tag", tag)?;
+                } else {
+                    self.pane_vars.insert(key, tag.to_string());
+                }
+                Ok(Some(tag.to_string()))
+            }
+            None => {
+                let owned = self
+                    .pane_vars
+                    .get(&key)
+                    .is_some_and(|value| pane.tag.as_deref() == Some(value.as_str()));
+                if owned {
+                    self.unset_pane_var(&pane.id, "@tpane_tag")?;
+                    Ok(None)
+                } else {
+                    Ok(pane.tag.clone())
+                }
+            }
+        }
     }
 
     fn set_pane_var(&mut self, pane_id: &str, name: &str, value: &str) -> Result<()> {
@@ -674,7 +700,7 @@ impl Daemon {
             .filter(|pane| is_hidden_session(&pane.session))
             .map(|pane| pane.session.clone())
             .collect::<HashSet<_>>();
-        let agents = panes.iter().filter(|pane| is_agent(pane)).count();
+        let stateful = panes.iter().filter(|pane| pane.state.is_some()).count();
         let mut issues = Vec::new();
         let mut cleaned = Vec::new();
         let mut seen: HashMap<(String, String, String), String> = HashMap::new();
@@ -719,7 +745,7 @@ impl Daemon {
                 "issues".to_string()
             },
             format!("panes: {}", panes.len()),
-            format!("agents: {agents}"),
+            format!("stateful panes: {stateful}"),
             format!("hidden sessions: {}", hidden_sessions.len()),
             format!("keybinds: {}", self.lua.keybinds().len()),
             format!("panels: {panels}"),
@@ -804,18 +830,19 @@ fn status_strip(
     if has_errors {
         parts.push("#[fg=red]tpane error#[default]".to_string());
     }
-    parts.extend(panes.iter().filter(|pane| is_agent(pane)).map(|pane| {
-        format!(
-            "{} {}",
-            status_dot(pane.state.as_deref(), &presentation),
-            pane.label
-        )
-    }));
+    parts.extend(
+        panes
+            .iter()
+            .filter(|pane| pane.state.is_some())
+            .map(|pane| {
+                format!(
+                    "{} {}",
+                    status_dot(pane.state.as_deref(), &presentation),
+                    pane.label
+                )
+            }),
+    );
     parts.join("  ")
-}
-
-fn is_agent(pane: &PaneSnapshot) -> bool {
-    pane.tag.as_deref() == Some("agent")
 }
 
 fn is_hidden_session(session: &str) -> bool {
@@ -1103,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn status_strip_shows_agent_states() {
+    fn status_strip_shows_pane_states() {
         let presentation = |state: &str| match state {
             "blocked" => Some(StatePresentation {
                 color: Some("red".to_string()),
@@ -1120,13 +1147,12 @@ mod tests {
             "#[fg=red]●#[default]"
         );
         assert!(status_strip(&[pane("%1", true)], false, presentation).is_empty());
-        let mut agent = pane("%2", false);
-        agent.tag = Some("agent".to_string());
-        agent.label = "pi".to_string();
-        agent.state = Some("idle_seen".to_string());
+        let mut stateful = pane("%2", false);
+        stateful.label = "worker".to_string();
+        stateful.state = Some("idle_seen".to_string());
         assert_eq!(
-            status_strip(&[agent], false, presentation),
-            "#[fg=green]●#[default] pi"
+            status_strip(&[stateful], false, presentation),
+            "#[fg=green]●#[default] worker"
         );
         assert_eq!(
             status_strip(&[], true, presentation),

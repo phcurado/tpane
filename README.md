@@ -1,6 +1,6 @@
 # tpane
 
-tpane lets you improve your `tmux.conf` by having good defaults and letting you define most of your configuration in Lua. It ships with widgets and a plugin ecosystem: use widgets to improve your navbar, and plugins to improve your workflow.
+tpane lets you improve your `tmux.conf` by moving most of your configuration to Lua. It ships with widgets and a plugin system: use widgets to improve your navbar, and plugins to improve your workflow.
 
 ## What it looks like
 
