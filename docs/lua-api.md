@@ -1,131 +1,380 @@
 # Lua API
 
-tpane loads top-level `*.lua` files under `~/.config/tmux/tpane`.
-Plugins load only when referenced with `tpane.use`.
-Other Lua files are libraries loaded with `require`.
-
-## Kinds
-
-A kind tells tpane what a pane is and what label to show for it.
-
-```lua
-tpane.kind { name = "psql", match = "psql" }
-```
-
-When a pane is running `psql`, tpane marks that pane like this:
-
-```lua
-pane.kind  -- "psql"
-pane.label -- "psql"
-```
-
-You can use that in a widget. This status widget shows how many `psql` panes are
-running:
-
-```lua
-tpane.widget("databases", function(ctx)
-  local count = 0
-  for _, pane in ipairs(ctx.panes) do
-    if pane.kind == "psql" then count = count + 1 end
-  end
-  if count == 0 then return nil end
-  return { text = "db " .. count, fg = "green" }
-end)
-
-tpane.statusline { right = { "databases", "clock" } }
-```
-
-Now, when any pane in tmux is running `psql`, the statusline shows `db 1`,
-`db 2`, and so on. Full paths work too, so `/usr/bin/psql` is treated as
-`psql`.
-
-Use `detect` when process name is not enough:
-
-```lua
-tpane.kind {
-  name = "server",
-  detect = function(pane)
-    return pane:running("node") and pane.cwd:match("/server$") ~= nil
-  end,
-}
-```
-
-`pane:running("node")` checks the pane's process tree for a `node` process.
-`pane.cwd` is the pane's current directory.
-
-You can change the shown label:
-
-```lua
-tpane.kind {
-  name = "editor",
-  match = "my-editor",
-  label = function(pane)
-    return "editor · " .. pane.cwd_basename
-  end,
-}
-```
-
-## State
-
-A kind can report state. tpane uses it for border/status/control indicators.
-
-```lua
-tpane.kind {
-  name = "worker",
-  match = "worker",
-  state = function(pane)
-    if pane:var("@tpane_push_state") == "blocked" then return "blocked" end
-    if pane:capture():match("Running") then return "working" end
-    return "idle"
-  end,
-}
-```
-
-State values are plain strings. Built-in presentations exist for:
+tpane loads top-level `*.lua` files under:
 
 ```text
-approval
-blocked
-working
-done_unseen
-idle_seen
+~/.config/tmux/tpane
 ```
 
-Declare how custom states render with `tpane.state`:
+Set `TPANE_CONFIG_DIR` to use another directory.
+
+Files in subdirectories are not auto-loaded. Use Lua's `require`:
 
 ```lua
-tpane.state("approval", { color = "yellow", glyph = "" })
-local presentation = tpane.state("approval")
+local colors = require("theme.colors") -- ~/.config/tmux/tpane/theme/colors.lua
 ```
 
-`color` is a tmux color. `glyph` is a marker used by Lua renderers such as the
-`companions` widget, pane border renderer, or plugins. Detection stays
-separate: a kind's `state` function may return any string. Returning `done`
-from detection is treated as `done_unseen` until the pane is focused.
+## Replacing tmux.conf
 
-Example approval state:
+### Options
+
+Use `tpane.opt` for normal tmux options:
 
 ```lua
-tpane.state("approval", { color = "yellow", glyph = "" })
+tpane.opt.mouse = true              -- set -g mouse on
+tpane.opt.history_limit = 5000      -- set -g history-limit 5000
+tpane.opt.mode_keys = "vi"          -- set -g mode-keys vi
+tpane.opt.renumber_windows = true   -- set -g renumber-windows on
+tpane.opt.escape_time = 0           -- set -g escape-time 0
+```
 
-tpane.kind {
-  name = "reviewer",
-  match = "reviewer",
-  state = function(pane)
-    if pane:capture():match("approval required") then return "approval" end
-    if pane:capture():match("running") then return "working" end
-    return "idle"
-  end,
-}
+### Appending to tmux options
 
+Some tmux options are usually extended instead of replaced. In `tmux.conf` that
+looks like this:
+
+```tmux
+set -ga update-environment TERM
+set -ga update-environment TERM_PROGRAM
+```
+
+In Lua, use `tpane.append`:
+
+```lua
+tpane.append("update_environment", "TERM")
+tpane.append("update_environment", "TERM_PROGRAM")
+```
+
+### Key bindings
+
+Use `tpane.bind(key, action[, opts])`:
+
+```lua
+tpane.bind("h", tpane.pane.select("left"))
+tpane.bind("j", tpane.pane.select("down"))
+tpane.bind("k", tpane.pane.select("up"))
+tpane.bind("l", tpane.pane.select("right"))
+```
+
+By default, bindings uses tmux's prefix. Use `prefix = false` for keybindings that are not using tmux prefix:
+
+```lua
+tpane.bind("M-Left", tpane.pane.resize("left", 10), { prefix = false })
+```
+
+Use `mode = "copy"` for copy mode:
+
+```lua
+tpane.bind("v", tpane.copy.begin(), { mode = "copy" })
+tpane.bind("r", tpane.copy.rectangle(), { mode = "copy" })
+tpane.bind("y", tpane.copy.copy(), { mode = "copy" })
+```
+
+### Lua key handlers
+
+A binding can run Lua. The handler receives the pane that invoked the binding:
+
+```lua
+tpane.bind("L", function(pane)
+  tpane.toggle(pane, "logs")
+end)
+```
+
+### Raw tmux commands
+
+If tpane does not have a helper for something, you can write the tmux command directly:
+
+```lua
+tpane.bind("R", "source-file ~/.config/tmux/tmux.conf ; display 'reloaded'")
+```
+
+For multiple raw commands, use `tpane.raw` with a list:
+
+```lua
+tpane.bind("C-S-l", tpane.raw({
+  "swap-window -t +1",
+  "select-window -t +1",
+}), { prefix = false })
+```
+
+### Unbinding
+
+```lua
+tpane.unbind("C-b")
+tpane.unbind("v", { mode = "copy" })
+```
+
+## Actions
+
+Actions are values you pass to `tpane.bind`.
+
+### `tpane.run`
+
+Run a Lua command registered with `tpane.command`:
+
+```lua
+tpane.bind("x", tpane.run("hello"))
+tpane.bind("x", tpane.run({ "hello", "arg1" }))
+```
+
+### `tpane.raw`
+
+Run raw tmux commands:
+
+```lua
+tpane.raw("select-pane -L")
+tpane.raw({ "swap-window -t +1", "select-window -t +1" })
+```
+
+### Pane actions
+
+```lua
+tpane.pane.select("left")
+tpane.pane.select("right")
+tpane.pane.select("up")
+tpane.pane.select("down")
+
+tpane.pane.resize("left", 10)
+tpane.pane.resize("right", 10)
+tpane.pane.resize("up", 5)
+tpane.pane.resize("down", 5)
+
+tpane.pane.split("right", { cwd = "pane" })
+tpane.pane.split("down", { cwd = "pane" })
+tpane.pane.split("left")
+tpane.pane.split("up")
+```
+
+`cwd = "pane"` means use the current pane's directory.
+
+### Window actions
+
+```lua
+tpane.window.new({ cwd = "pane" })
+tpane.window.swap("next")
+tpane.window.swap("prev")
+```
+
+### Copy-mode actions
+
+```lua
+tpane.copy.begin()
+tpane.copy.begin({ rectangle = true })
+tpane.copy.rectangle()
+tpane.copy.copy()
+```
+
+### Key actions
+
+```lua
+tpane.key.prefix()
+```
+
+## Status bar and tabs
+
+### Widgets
+
+A widget is a Lua function that returns text, a styled table, a list of parts, or
+`nil` to hide itself.
+
+```lua
+tpane.widget("host", function()
+  return os.getenv("HOSTNAME") or ""
+end)
+
+tpane.widget("mode", function(ctx)
+  if ctx.pane and ctx.pane.zoomed then
+    return { text = "zoom", fg = "yellow", bold = true }
+  end
+end)
+```
+
+Widget context:
+
+```lua
+ctx.session  -- current session name
+ctx.window   -- current window id, like @2
+ctx.pane     -- current pane object, or nil
+ctx.panes    -- all pane objects
+```
+
+Built-in widgets:
+
+```text
+session
+clock
+companions
+```
+
+Raw tmux format strings also work:
+
+```lua
+tpane.widget("prefix", function()
+  return tpane.fmt.prefix("PREFIX", "")
+end)
+```
+
+### Statusline
+
+```lua
 tpane.statusline {
-  right = { "companions", "clock" },
+  position = "top",
+  interval = 1,
+  left = { "session" },
+  right = { "host", "clock" },
+  separator = "  ",
 }
+```
+
+### Styled parts
+
+```lua
+return { text = "ok", fg = "green", bold = true }
+```
+
+Supported style keys:
+
+```text
+fg, bg, bold, dim, italics, blink, reverse, hidden, strikethrough, underscore,
+align, fill
+```
+
+### Tabline
+
+`tpane.tabline` writes the common `window-status-format` options for you:
+
+```lua
+tpane.tabline {
+  label = "cwd", -- cwd, name, or a raw tmux format string
+  inactive = { fg = "#777777" },
+  current = { fg = "#8caaee", bold = true },
+}
+```
+
+## Plugins
+
+Plugins are referenced from Lua with `tpane.use`.
+
+Built-in plugins:
+
+```lua
+tpane.use("vim-navigator")
+tpane.use("yank")
+tpane.use("agents")
+```
+
+Git plugins:
+
+```lua
+tpane.use("theme", {
+  repo = "https://github.com/example/tpane-theme.git",
+  branch = "main",
+})
+```
+
+Monorepo plugin path:
+
+```lua
+tpane.use("tool", {
+  repo = "https://github.com/example/tools.git",
+  path = "plugins/tpane-tool",
+})
+```
+
+`repo` is the git URL. `url` also works. `branch`, `tag`, and `rev` are mutually
+exclusive. `path` is relative to the repo and uses sparse checkout.
+
+Plugin commands:
+
+```sh
+tpane plugin status      # show referenced, installed, dirty, and update state
+tpane plugin sync        # install/update plugins referenced by Lua config
+tpane plugin update      # update all installed plugins
+tpane plugin update NAME # update one plugin
+tpane plugin clean       # remove installed plugins not referenced by Lua config
+tpane plugin list        # list installed git plugins
+tpane plugin remove NAME # remove one installed plugin
+```
+
+## Commands
+
+Register commands when you want a Lua function callable from the CLI or from a
+key binding.
+
+```lua
+tpane.command("hello", function(args)
+  return "hello " .. (args[1] or "")
+end)
+```
+
+Run it:
+
+```sh
+tpane run hello world
+```
+
+Bind it:
+
+```lua
+tpane.bind("H", tpane.run("hello"))
+```
+
+## Reusable panes
+
+Register panes you want to show/hide later:
+
+```lua
+tpane.register_pane("logs", {
+  side = "bottom",
+  size = "25%",
+  command = "tail -f logs/app.log",
+})
+```
+
+Use key handlers to control it:
+
+```lua
+tpane.bind("L", function(pane)
+  tpane.toggle(pane, "logs")
+end)
+
+tpane.bind("M-L", function(pane)
+  tpane.expand(pane, "logs")
+end, { prefix = false })
+```
+
+`toggle` shows or hides it. Hidden panes are stashed, so the process keeps
+running. `expand` shows it and zooms the layout around it.
+
+Options:
+
+```lua
+tag = "logs"                 -- defaults to registered name
+name = "logs"                -- stash name, defaults to registered name
+side = "bottom"              -- bottom | top | right | left
+size = "25%"
+full = true                  -- split across the full window
+anchor = { tag = "editor" }  -- optional target pane for split/unstash
+command = "tail -f app.log"
+title = "logs"
+label = "logs"
+blocked_message = "..."      -- shown instead of hiding a blocked pane
+```
+
+Use `tpane.split` when you want a one-off split instead of a registered pane:
+
+```lua
+local pane = tpane.split(current, {
+  side = "bottom",
+  size = "25%",
+  command = "zsh",
+})
 ```
 
 ## Pane objects
 
-Kind callbacks, key handlers, events, and `tpane.panes()` use pane objects.
+Kind callbacks, key handlers, events, widgets, and `tpane.panes()` use pane
+objects.
 
 Fields:
 
@@ -135,14 +384,14 @@ pane.pid           -- root process pid
 pane.cwd           -- current directory
 pane.cwd_basename  -- last path component of cwd
 pane.command       -- tmux pane_current_command
-pane.session       -- tmux session name
-pane.window        -- tmux window id, like @2
+pane.session       -- session name
+pane.window        -- window id, like @2
 pane.active        -- true if focused
-pane.zoomed        -- true if the window is zoomed
+pane.zoomed        -- true if window is zoomed
 pane.kind          -- detected kind
 pane.label         -- shown label
 pane.tag           -- user tag set by tpane
-pane.home          -- user home window for stashed panes
+pane.home          -- home window for stashed panes
 pane.state         -- current state, if any
 ```
 
@@ -153,9 +402,10 @@ pane:running("psql")
 pane:var("@tmux_var")
 pane:set { tag = "logs", label = "logs" }
 pane:capture()
+pane:proc_tree()
 ```
 
-For uncommon process matching, inspect the process tree:
+Process tree example:
 
 ```lua
 pane:proc_tree():any(function(proc)
@@ -163,319 +413,90 @@ pane:proc_tree():any(function(proc)
 end)
 ```
 
-## Find panes
+Find panes:
 
 ```lua
-local current = tpane.panes()[1]
-local logs = tpane.find { tag = "logs", window = current.window }
+local logs = tpane.find { tag = "logs" }
 local all_logs = tpane.find_all { tag = "logs" }
 ```
 
 All fields in the query must match.
 
-## Reusable panes
+## Kinds and states
 
-Register a pane you want to show/hide later:
-
-```lua
-tpane.register_pane("logs", {
-  dir = "below",
-  size = "25%",
-  command = "tail -f logs/app.log",
-})
-```
-
-Bind keys to it:
+A kind tells tpane what a pane is.
 
 ```lua
-tpane.bind("M-e", function(pane)
-  tpane.toggle(pane, "logs")
-end, { prefix = false })
-
-tpane.bind("M-E", function(pane)
-  tpane.expand(pane, "logs")
-end, { prefix = false })
+tpane.kind { name = "database", match = "psql" }
 ```
 
-`toggle` shows or hides it. Hidden panes are stashed, so the process keeps
-running. `expand` shows it and expands it.
-
-Options:
+When a pane is running `psql`:
 
 ```lua
-tag = "logs"              -- defaults to the registered name
-name = "logs"             -- stash name, defaults to the registered name
-side = "bottom"           -- bottom | top | right | left; dir/direction are accepted aliases
-size = "25%"
-full = true               -- split across the full window, not only the current pane
-anchor = { tag = "editor" } -- optional target pane for split/unstash; defaults to the window's non-companion pane
-command = "tail -f logs/app.log" -- command to run in the pane
-title = "logs"
-label = "logs"
-blocked_message = "..."   -- shown instead of hiding a blocked pane
+pane.kind  -- database
+pane.label -- database
 ```
 
-## Split directly
-
-Use this when you do not need a registered pane:
+Use `detect` for custom matching:
 
 ```lua
-local logs = tpane.split(pane, {
-  side = "bottom",
-  size = "25%",
-  full = true,
-  command = "zsh",
-  tag = "logs",
-})
-```
-
-It returns a pane handle.
-
-## tmux.conf equivalents
-
-| tmux.conf                                                | Lua                                                                       |
-| -------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `set -g mouse on`                                        | `tpane.opt.mouse = true`                                                  |
-| `set -g history-limit 5000`                              | `tpane.opt.history_limit = 5000`                                          |
-| `set -ga update-environment TERM`                        | `tpane.append("update_environment", "TERM")`                              |
-| `unbind C-b`                                             | `tpane.unbind("C-b")`                                                     |
-| `bind h select-pane -L`                                  | `tpane.bind("h", tpane.pane.select("left"))`                              |
-| `bind -n M-Left resize-pane -L 10`                       | `tpane.bind("M-Left", tpane.pane.resize("left", 10), { prefix = false })` |
-| `bind -T copy-mode-vi y send-keys -X copy-selection`     | `tpane.bind("y", tpane.copy.copy(), { mode = "copy" })`                   |
-| `bind % split-window -h -c "#{pane_current_path}"`       | `tpane.bind("%", tpane.pane.split("right", { cwd = "pane" }))`            |
-| `bind -n C-S-l swap-window -t +1 \; select-window -t +1` | `tpane.bind("C-S-l", tpane.window.swap("next"), { prefix = false })`      |
-
-## Key bindings
-
-```lua
-tpane.bind("a", function(pane)
-  tpane.toggle(pane, "logs")
-end)
-```
-
-The function receives the pane that invoked the binding.
-
-Bind to a command instead:
-
-```lua
-tpane.bind("a", tpane.run("hello"))
-tpane.bind("Space", tpane.run("control"), { popup = true })
-```
-
-Options: `popup`, `context`, `prefix`, `mode`, `table`.
-
-By default, bindings use tmux's prefix table. Use `prefix = false` for a
-no-prefix binding. Use `mode = "copy"` for copy mode.
-
-```lua
-tpane.bind("C-g", function(pane)
-  tpane.expand(pane)
-end, { prefix = false })
-
-tpane.bind("h", tpane.pane.select("left"))
-tpane.bind("M-Left", tpane.pane.resize("left", 10), { prefix = false })
-tpane.bind("v", tpane.copy.begin { rectangle = true }, { mode = "copy" })
-```
-
-## Commands
-
-Use commands when you want a CLI verb:
-
-```lua
-tpane.command("hello", function(args)
-  return "hi " .. (args[1] or "")
-end)
-```
-
-Then:
-
-```sh
-tpane run hello there
-```
-
-## Panels
-
-```lua
-tpane.panel {
-  id = "workspace",
-  title = "Workspace",
-  cards = function()
-    return {
-      { title = "logs", tag = "key", enter = tpane.run("hello") },
-    }
+tpane.kind {
+  name = "server",
+  detect = function(pane)
+    return pane:running("node") and pane.cwd:match("/server$") ~= nil
   end,
 }
 ```
 
-## Modules and plugins
-
-Use Lua's `require` for shared config code:
+Use `label` to change what is shown:
 
 ```lua
-local helper = require("lib.helper") -- ~/.config/tmux/tpane/lib/helper.lua
-```
-
-Installed plugins live under `~/.local/share/tpane/plugins/<name>`. They are not
-auto-loaded. Reference them from config with `tpane.use`:
-
-```lua
-tpane.use("agents") -- built in
-tpane.use("navigator") -- built in
-tpane.use("yank") -- built in
-tpane.use("foo", { repo = "https://github.com/example/tpane-plugin.git", branch = "main" })
-tpane.use("theme", { repo = "https://github.com/example/theme.git", tag = "v1.2.0" })
-tpane.use("tool", { repo = "https://github.com/example/mono.git", rev = "abc123", path = "plugins/tool" })
-```
-
-`repo` is the git repository URL (`url` also works). `branch`, `tag`, and `rev`
-are mutually exclusive. `path` is relative to the plugin repository and uses a
-sparse checkout. If `repo` is set and the plugin is missing, tpane installs it
-before loading it.
-
-Plugin commands are for maintenance; installation normally comes from `tpane.use`:
-
-```sh
-tpane plugin status
-tpane plugin sync # install/update plugins referenced by config
-tpane plugin update foo
-tpane plugin update
-tpane plugin clean
-tpane plugin list
-tpane plugin remove foo
-```
-
-## Status line
-
-Define widgets and compose tmux `status-left` / `status-right` from Lua:
-
-```lua
-tpane.widget("cwd", function(ctx)
-  return { text = ctx.pane and ctx.pane.cwd_basename or "", fg = "green" }
-end)
-
-tpane.statusline {
-  position = "bottom",
-  interval = 1,
-  left = { "session" },
-  right = { "cwd", "clock" },
-  separator = "  ",
+tpane.kind {
+  name = "editor",
+  match = "nvim",
+  label = function(pane)
+    return "editor " .. pane.cwd_basename
+  end,
 }
 ```
 
-Widget functions receive a context table:
+Kinds can report state:
 
 ```lua
-ctx.session  -- current client session
-ctx.window   -- current client window id
-ctx.pane     -- current client pane object, or nil when no panes exist
-ctx.panes    -- all pane objects
-```
-
-Widget functions return a raw string, a styled table with `text`, an array of
-strings/styled tables, or `nil` to hide the segment. Raw strings may include tmux
-formats and styles. Table style keys mirror tmux attributes: `fg`, `bg`, `bold`,
-`dim`, `italics`, `blink`, `reverse`, `hidden`, `strikethrough`, `underscore`,
-`align`, and `fill`.
-
-Built-in widgets: `session`, `clock`, `companions`. The built-in `agents`
-plugin adds the `agents` widget and `agent_next` command when loaded. Raw tmux
-format strings are also supported.
-
-Use `tpane.tabline` for the common window-status format without hand-writing
-nested tmux options:
-
-```lua
-tpane.tabline {
-  label = "cwd", -- "cwd", "name", or any raw tmux format string
-  inactive = { fg = "#777777" },
-  current = { fg = "#8caaee", bold = true },
+tpane.kind {
+  name = "worker",
+  match = "worker",
+  state = function(pane)
+    if pane:capture():match("blocked") then return "blocked" end
+    if pane:capture():match("running") then return "working" end
+    return "idle"
+  end,
 }
 ```
 
-## Tmux options
+Built-in state presentations:
 
-Set options directly:
-
-```lua
-tpane.opt.mouse = true
-tpane.opt.history_limit = 5000
-tpane.opt.mode_keys = "vi"
+```text
+approval
+blocked
+working
+done_unseen
+idle_seen
 ```
 
-Or set a batch with nested keys. Underscores become dashes:
+Declare custom state presentation:
 
 ```lua
-tpane.options {
-  status = {
-    style = { bg = "default" },
-    left_length = 120,
-  },
-  pane = {
-    border = {
-      lines = "heavy",
-      style = { fg = "#51576d" },
-    },
-    active = {
-      border = {
-        style = { fg = "#8caaee" },
-      },
-    },
-  },
-}
+tpane.state("waiting", { color = "yellow", glyph = "…" })
+local presentation = tpane.state("waiting")
 ```
 
-Nested keys become tmux option names by joining them with `-`, so
-`status.left_length` sets `status-left-length`.
+Returning `done` from detection is treated as `done_unseen` until the pane is
+focused.
 
-Style options accept Lua style tables:
+## Store
 
-```lua
-tpane.options {
-  status = { style = { bg = "default" } }, -- status-style bg=default
-}
-```
-
-Format options can be plain strings, or styled tables with `text`:
-
-```lua
-tpane.options {
-  window = {
-    status = {
-      current_format = { text = "#I:#W", fg = "blue", bold = true },
-    },
-  },
-}
-```
-
-Use a literal option name only when nesting would be awkward:
-
-```lua
-tpane.options {
-  ["some-tmux-option"] = "value",
-}
-```
-
-## Format helpers
-
-Use `tpane.fmt` for tmux conditionals that do not have Lua equivalents:
-
-```lua
-tpane.fmt.prefix("", "")
-tpane.fmt.when("window_zoomed_flag", "Z", "")
-```
-
-## Public API surface
-
-The intended public Lua surface is: `tpane.use`, `tpane.kind`, `tpane.state`,
-`tpane.widget`, `tpane.statusline`, `tpane.tabline`, `tpane.options`,
-`tpane.on`, `tpane.command`, `tpane.panel`, `tpane.bind`, `tpane.panes`,
-`tpane.find`, `tpane.find_all`, pane objects/handles, reusable pane helpers
-(`register_pane`, `split`, `toggle`, `show`, `hide`, `expand`), `tpane.tmux`,
-`tpane.fmt`, and `tpane.store`.
-
-## Persistent store
-
-`tpane.store` is a small JSON-backed scratch store for plugins.
+`tpane.store` is a small JSON-backed store for config and plugins.
 
 ```lua
 tpane.store.set("counter", 1)
@@ -484,24 +505,6 @@ tpane.store.delete("counter")
 ```
 
 Values may be strings, numbers, booleans, tables, or nil.
-
-## Workspaces
-
-Declare reusable layouts in Lua:
-
-```lua
-tpane.workspace {
-  name = "dev",
-  windows = {
-    { name = "app", command = "zsh" },
-    { name = "logs", panes = { { dir = "below", size = "30%", command = "tail -f app.log" } } },
-  },
-}
-
-tpane.command("dev", function()
-  tpane.apply_workspace("dev")
-end)
-```
 
 ## Events
 
@@ -513,9 +516,52 @@ tpane.on("window:close", function(window_id) end)
 tpane.on("state:change", function(pane_id) end)
 ```
 
+## Panels
+
+Panels are simple TUI views shown by `tpane control`.
+
+```lua
+tpane.panel {
+  id = "tools",
+  title = "Tools",
+  cards = function()
+    return {
+      { title = "hello", tag = "command", enter = tpane.run("hello") },
+    }
+  end,
+}
+```
+
+## Workspaces
+
+Declare reusable layouts in Lua:
+
+```lua
+tpane.workspace {
+  name = "dev",
+  windows = {
+    { name = "app", command = "zsh" },
+    { name = "logs", panes = { { side = "bottom", size = "30%", command = "tail -f app.log" } } },
+  },
+}
+
+tpane.command("dev", function()
+  tpane.apply_workspace("dev")
+end)
+```
+
+## Format helpers
+
+Use `tpane.fmt` for tmux conditionals that do not have Lua equivalents:
+
+```lua
+tpane.fmt.prefix("", "")
+tpane.fmt.when("window_zoomed_flag", "Z", "")
+```
+
 ## Low-level tmux helpers
 
-Use these when the helpers above are not enough:
+Use these when the higher-level helpers are not enough:
 
 ```lua
 local window = tpane.tmux.new_window { name = "logs", cwd = pane.cwd, command = "zsh" }
@@ -526,14 +572,45 @@ tpane.tmux.stash { pane = pane.id, window = pane.window, cwd = pane.cwd, name = 
 tpane.tmux.unstash { pane = hidden.id, target = pane.id, horizontal = true, size = "35%" }
 tpane.tmux.unzoom(pane.window)
 tpane.tmux.select(pane.id)
-tpane.tmux.zoom(pane.id) -- tmux resize-pane -Z
+tpane.tmux.zoom(pane.id)
 tpane.tmux.display { target = pane.id, message = "message" }
 ```
 
-## Compatibility aliases
+## Public API
 
-```lua
-tpane.register_kind    -- tpane.kind
-tpane.register_command -- tpane.command
-tpane.register_panel   -- tpane.panel
+Main API:
+
+```text
+tpane.use
+tpane.opt
+tpane.append
+tpane.options
+tpane.bind
+tpane.unbind
+tpane.run
+tpane.raw
+tpane.pane.*
+tpane.window.*
+tpane.copy.*
+tpane.key.*
+tpane.widget
+tpane.statusline
+tpane.tabline
+tpane.command
+tpane.panel
+tpane.register_pane
+tpane.split
+tpane.toggle
+tpane.show
+tpane.hide
+tpane.expand
+tpane.panes
+tpane.find
+tpane.find_all
+tpane.kind
+tpane.state
+tpane.on
+tpane.store
+tpane.tmux
+tpane.fmt
 ```

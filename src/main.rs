@@ -294,7 +294,7 @@ fn builtin_plugin_status(status: &plugins::PluginStatus) -> bool {
 }
 
 fn builtin_plugin_name(name: &str) -> bool {
-    matches!(name, "agents" | "navigator" | "yank")
+    matches!(name, "agents" | "vim-navigator" | "yank")
 }
 
 fn git_plugin_status_line(status: &plugins::PluginStatus) -> String {

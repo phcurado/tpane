@@ -1,64 +1,38 @@
 # tpane
 
-Extend your tmux configuration with Lua.
+tpane lets you improve your `tmux.conf` by having good defaults and letting you define most of your configuration in Lua. It ships with widgets and a plugin ecosystem: use widgets to improve your navbar, and plugins to improve your workflow.
 
-## Example
-
-Configure your statusbar in Lua:
+## What it looks like
 
 ```lua
+-- ~/.config/tmux/tpane/init.lua
+tpane.use("vim-navigator") -- vim-style pane navigation
+tpane.use("yank")      -- copy-mode clipboard helpers
+
+-- options
+tpane.opt.mouse = true
+tpane.opt.history_limit = 5000
+tpane.opt.mode_keys = "vi"
+
+-- keybinds
+tpane.bind("h", tpane.pane.select("left"))
+tpane.bind("j", tpane.pane.select("down"))
+tpane.bind("k", tpane.pane.select("up"))
+tpane.bind("l", tpane.pane.select("right"))
+tpane.bind("%", tpane.pane.split("right", { cwd = "pane" }))
+tpane.bind('"', tpane.pane.split("down", { cwd = "pane" }))
+
+-- navbar
 tpane.widget("project", function(ctx)
   return ctx.pane and ctx.pane.cwd_basename or ""
 end)
 
 tpane.statusline {
-  left = { "session", "project" },
-  right = { "clock" },
+  position = "top",
+  left = { "session" },
+  right = { "project", "clock" },
 }
 ```
-
-Configure tmux window tabs without hand-writing tmux format strings:
-
-```lua
-tpane.tabline {
-  label = "cwd",
-  inactive = { fg = "#777777" },
-  current = { fg = "#8caaee", bold = true },
-}
-```
-
-Set tmux options with Lua tables when you want styling:
-
-```lua
-tpane.options {
-  status = { style = { bg = "default" } },
-  pane = { border = { style = { fg = "#51576d" } } },
-}
-```
-
-Or add keybinds and work with complex flows. Say you want a logs pane below the current pane. You want one key to show or hide it without killing the shell inside it, and another key to expand it.
-
-```lua
--- ~/.config/tmux/tpane/init.lua
-tpane.register_pane("logs", {
-  side = "bottom",
-  size = "25%",
-  command = "tail -f logs/app.log",
-})
-
-tpane.bind("M-e", function(pane)
-  tpane.toggle(pane, "logs")
-end, { prefix = false })
-
-tpane.bind("M-E", function(pane)
-  tpane.expand(pane, "logs")
-end, { prefix = false })
-```
-
-`M-e` shows or hides a pane running `tail -f logs/app.log` below the current pane.
-When hidden, the pane is stashed, so the process inside keeps running.
-
-`M-E` expands the logs pane. Press it again to return to the normal layout.
 
 ## Install
 
@@ -72,25 +46,183 @@ From source:
 cargo install --path . --locked --force
 ```
 
-## tmux
+## Minimal tmux.conf
 
-Start it from `tmux.conf`:
+Only a few settings are necessary to live in `tmux.conf` file. These are the settings that are good to start with tmux, and `tpane` will have the runtime config:
 
 ```tmux
+set -g default-terminal "xterm-256color"
+set -as terminal-features ",xterm-256color:RGB"
+
+set -g base-index 1
+set -g pane-base-index 1
+
+set -g status-position top
+set -g status-style bg=default
+
+unbind C-b
+set -g prefix C-a
+bind C-a send-prefix
+
+# Add tpane here so you can configure all the rest in lua
 run-shell -b 'tpane'
 ```
 
-## Config
+## Config location
 
-tpane loads top-level Lua files and plugin entrypoints under:
+tpane loads top-level Lua files from:
 
 ```text
 ~/.config/tmux/tpane
 ```
 
-Set `TPANE_CONFIG_DIR` to use a different directory.
+Set `TPANE_CONFIG_DIR` to use another directory.
 
-Full Lua reference: [`docs/lua-api.md`](docs/lua-api.md).
+## Replace tmux config with Lua
+
+Use `tpane.opt` for tmux options:
+
+```lua
+tpane.opt.mouse = true
+tpane.opt.history_limit = 5000
+tpane.opt.mode_keys = "vi"
+tpane.opt.renumber_windows = true
+tpane.opt.escape_time = 0
+```
+
+tmux has options where you usually add one value without replacing the existing values. In tmux.conf that looks like:
+
+```tmux
+set -ga update-environment TERM
+set -ga update-environment TERM_PROGRAM
+```
+
+In Lua, use `tpane.append` for the same thing:
+
+```lua
+tpane.append("update_environment", "TERM")
+tpane.append("update_environment", "TERM_PROGRAM")
+```
+
+Bind keys with tmux-aware actions:
+
+```lua
+tpane.bind("h", tpane.pane.select("left"))
+tpane.bind("j", tpane.pane.select("down"))
+tpane.bind("k", tpane.pane.select("up"))
+tpane.bind("l", tpane.pane.select("right"))
+
+tpane.bind("%", tpane.pane.split("right", { cwd = "pane" }))
+tpane.bind('"', tpane.pane.split("down", { cwd = "pane" }))
+
+tpane.bind("M-Left", tpane.pane.resize("left", 10), { prefix = false })
+```
+
+If some configuration is not supported by `tpane`, you can always write it the same way you would in tmux:
+
+```lua
+tpane.bind("R", "source-file ~/.config/tmux/tmux.conf ; display 'reloaded'")
+```
+
+## Status bar and tabs
+
+`tpane` lets you compose the statusline with widgets. It's very simple to add widgets to your statusline, and you can extend it or even create plugins for it (more on that in the next section).
+
+```lua
+tpane.widget("session", function(ctx)
+  return "[" .. ctx.session .. "]"
+end)
+
+tpane.widget("clock", function()
+  return os.date("%H:%M")
+end)
+
+tpane.widget("host", function()
+  return os.getenv("HOSTNAME") or ""
+end)
+
+tpane.statusline {
+  position = "top",
+  left = { "session" },
+  right = { "host", "clock" },
+}
+```
+
+Style tmux window tabs without writing the full tmux format by hand:
+
+```lua
+tpane.tabline {
+  label = "cwd",
+  inactive = { fg = "#777777" },
+  current = { fg = "#8caaee", bold = true },
+}
+```
+
+For lower-level styling, use nested tmux options:
+
+```lua
+tpane.options {
+  status = { style = { bg = "default" } },
+  pane = { border = { style = { fg = "#51576d" } } },
+}
+```
+
+## Plugins
+
+Plugins are referenced from Lua. Built-in plugins load by name:
+
+```lua
+tpane.use("vim-navigator")
+tpane.use("yank")
+```
+
+Git plugins install when first referenced:
+
+```lua
+tpane.use("theme", {
+  repo = "https://github.com/example/tpane-theme.git",
+  branch = "main",
+})
+```
+
+You can also reference a path in case the plugin is in a monorepo:
+
+```lua
+tpane.use("tool", {
+  repo = "https://github.com/example/tools.git",
+  path = "plugins/tpane-tool",
+})
+```
+
+And use the CLI to keep track of your plugins:
+
+```sh
+tpane plugin status      # show referenced, installed, dirty, and update state
+tpane plugin sync        # install/update plugins referenced by Lua config
+tpane plugin update      # update all installed plugins
+tpane plugin update NAME # update one plugin
+tpane plugin clean       # remove installed plugins not referenced by Lua config
+tpane plugin list        # list installed git plugins
+tpane plugin remove NAME # remove one installed plugin
+```
+
+## Reusable panes
+
+Register a pane once, then toggle or expand it from keybinds. Hidden panes keep
+their process running.
+
+```lua
+tpane.register_pane("logs", {
+  side = "bottom",
+  size = "25%",
+  command = "tail -f logs/app.log",
+})
+
+-- Show/Hide a pane 
+tpane.bind("L", function(pane)
+  tpane.toggle(pane, "logs")
+end)
+```
 
 ## CLI
 
@@ -104,26 +236,4 @@ tpane update   # update tpane
 tpane run NAME # run a Lua command
 ```
 
-Run `tpane --help` for everything else.
-
-## Plugins
-
-Plugins are loaded from Lua. If a git plugin is missing, tpane installs it the
-first time the config references it.
-
-```lua
-tpane.use("navigator") -- built in
-tpane.use("foo", { repo = "https://github.com/example/tpane-plugin.git", branch = "main" })
-tpane.use("theme", { repo = "https://github.com/example/theme.git", tag = "v1.2.0" })
-tpane.use("local", { repo = "https://github.com/example/mono.git", rev = "abc123", path = "plugins/local" })
-```
-
-```sh
-tpane plugin status
-tpane plugin sync # install/update plugins referenced by config
-tpane plugin update foo # update one installed plugin
-tpane plugin update # update all installed plugins
-tpane plugin clean # remove installed plugins not referenced by config
-tpane plugin list
-tpane plugin remove foo
-```
+Full Lua reference: [`docs/lua-api.md`](docs/lua-api.md).

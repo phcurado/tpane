@@ -1037,7 +1037,7 @@ mod tests {
             tpane.on("pane:new", function(_) counts.new = counts.new + 1 end)
             tpane.on("pane:focus", function(p) counts.focus = counts.focus + 1; focused = p.id end)
             tpane.on("tick", function() counts.tick = counts.tick + 1 end)
-            tpane.register_command{
+            tpane.command{
               name = "counts",
               handler = function()
                 return counts.new .. ":" .. counts.focus .. ":" .. counts.tick .. ":" .. focused
@@ -1065,7 +1065,7 @@ mod tests {
             r#"
             closed = ""
             tpane.on("window:close", function(window) closed = window end)
-            tpane.register_command{
+            tpane.command{
               name = "closed",
               handler = function() return closed end,
             }

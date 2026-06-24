@@ -272,7 +272,7 @@ impl LuaRuntime {
         tpane.set("use", use_plugin).map_err(lua_err)?;
 
         let kinds = Rc::clone(&self.kinds);
-        let register_kind = self
+        let kind = self
             .lua
             .create_function(move |lua, table: Table| {
                 let name: String = table.get("name")?;
@@ -323,10 +323,7 @@ impl LuaRuntime {
                 Ok(())
             })
             .map_err(lua_err)?;
-        tpane
-            .set("register_kind", register_kind.clone())
-            .map_err(lua_err)?;
-        tpane.set("kind", register_kind).map_err(lua_err)?;
+        tpane.set("kind", kind).map_err(lua_err)?;
 
         let states = Rc::clone(&self.states);
         let state = self
@@ -360,7 +357,7 @@ impl LuaRuntime {
         tpane.set("state", state).map_err(lua_err)?;
 
         let commands = Rc::clone(&self.commands);
-        let register_command = self
+        let command = self
             .lua
             .create_function(move |lua, args: mlua::MultiValue| {
                 let values = args.into_iter().collect::<Vec<_>>();
@@ -381,12 +378,7 @@ impl LuaRuntime {
                 Ok(())
             })
             .map_err(lua_err)?;
-        tpane
-            .set("command", register_command.clone())
-            .map_err(lua_err)?;
-        tpane
-            .set("register_command", register_command)
-            .map_err(lua_err)?;
+        tpane.set("command", command).map_err(lua_err)?;
 
         let events = Rc::clone(&self.events);
         let on = self
@@ -438,7 +430,7 @@ impl LuaRuntime {
         tpane.set("unbind", unbind).map_err(lua_err)?;
 
         let panels = Rc::clone(&self.panels);
-        let register_panel = self
+        let panel = self
             .lua
             .create_function(move |lua, table: Table| {
                 let id: String = table.get("id")?;
@@ -452,12 +444,7 @@ impl LuaRuntime {
                 Ok(())
             })
             .map_err(lua_err)?;
-        tpane
-            .set("panel", register_panel.clone())
-            .map_err(lua_err)?;
-        tpane
-            .set("register_panel", register_panel)
-            .map_err(lua_err)?;
+        tpane.set("panel", panel).map_err(lua_err)?;
 
         let widgets = Rc::clone(&self.widgets);
         let widget = self
@@ -1459,9 +1446,9 @@ fn load_plugin(lua: &Lua, name: &str, spec: &PluginSpec) -> mlua::Result<()> {
             .load(BUILTIN_PLUGIN_AGENTS)
             .set_name("builtin/plugins/agents/init.lua")
             .exec(),
-        "navigator" => lua
-            .load(BUILTIN_PLUGIN_NAVIGATOR)
-            .set_name("builtin/plugins/navigator/init.lua")
+        "vim-navigator" => lua
+            .load(BUILTIN_PLUGIN_VIM_NAVIGATOR)
+            .set_name("builtin/plugins/vim-navigator/init.lua")
             .exec(),
         "yank" => lua
             .load(BUILTIN_PLUGIN_YANK)
@@ -2080,7 +2067,7 @@ fn basename(path: &str) -> String {
 const PRELUDE: &str = include_str!("lua/prelude.lua");
 
 const BUILTIN_PLUGIN_AGENTS: &str = include_str!("../plugins/agents/init.lua");
-const BUILTIN_PLUGIN_NAVIGATOR: &str = include_str!("../plugins/navigator/init.lua");
+const BUILTIN_PLUGIN_VIM_NAVIGATOR: &str = include_str!("../plugins/vim-navigator/init.lua");
 const BUILTIN_PLUGIN_YANK: &str = include_str!("../plugins/yank/init.lua");
 
 const BUILTIN_KINDS: &str = include_str!("lua/builtin_kinds.lua");
@@ -2560,7 +2547,7 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.register_panel{
+                tpane.panel{
                   id = "workspace",
                   title = "Workspace",
                   cards = function()
@@ -2931,7 +2918,7 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.register_command{
+                tpane.command{
                   name = "hello",
                   handler = function(args) return "hi " .. args[1] end,
                 }
@@ -2954,7 +2941,7 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.register_command{
+                tpane.command{
                   name = "boom",
                   handler = function() error("nope") end,
                 }
@@ -3030,16 +3017,16 @@ mod tests {
     }
 
     #[test]
-    fn command_can_register_command_without_refcell_panic() {
+    fn command_can_call_command_without_refcell_panic() {
         let (runtime, _) = runtime();
         runtime
             .load_source(
                 "test.lua",
                 r#"
-                tpane.register_command{
+                tpane.command{
                   name = "outer",
                   handler = function()
-                    tpane.register_command{
+                    tpane.command{
                       name = "inner",
                       handler = function() return "inner ok" end,
                     }
@@ -3085,7 +3072,7 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.register_command{
+                tpane.command{
                   name = "pane_id",
                   handler = function()
                     local panes = tpane.panes()
@@ -3107,7 +3094,7 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.register_command{
+                tpane.command{
                   name = "method_types",
                   handler = function()
                     local p = tpane.pane("%9")
@@ -3130,7 +3117,7 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.register_command{
+                tpane.command{
                   name = "running",
                   handler = function()
                     local p = tpane.panes()[1]
@@ -3153,7 +3140,7 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.register_command{
+                tpane.command{
                   name = "method_types",
                   handler = function()
                     local p = tpane.panes()[1]
@@ -3178,7 +3165,7 @@ mod tests {
                 seen = ""
                 tpane.on("pane:new", function(p) seen = p.id end)
                 tpane.on("pane:new", function() error("bad event") end)
-                tpane.register_command{
+                tpane.command{
                   name = "seen",
                   handler = function() return seen end,
                 }
@@ -3202,7 +3189,7 @@ mod tests {
                 r#"
                 seen = ""
                 tpane.on("window:close", function(window) seen = window end)
-                tpane.register_command{
+                tpane.command{
                   name = "seen",
                   handler = function() return seen end,
                 }
@@ -3222,12 +3209,12 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.register_kind{
+                tpane.kind{
                   name = "broken",
                   detect = function() error("bad detect") end,
                   label = function() return "broken" end,
                 }
-                tpane.register_kind{
+                tpane.kind{
                   name = "ok",
                   detect = function() return true end,
                   label = function(p) return "ok · " .. p.cwd_basename end,
