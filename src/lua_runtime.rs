@@ -1433,13 +1433,7 @@ fn load_plugin(lua: &Lua, name: &str, spec: &PluginSpec) -> mlua::Result<()> {
             .exec();
     }
 
-    match name {
-        "agents" => lua
-            .load(PACKAGED_PLUGIN_AGENTS)
-            .set_name("packaged/plugins/agents/init.lua")
-            .exec(),
-        _ => Err(mlua::Error::RuntimeError(format!("unknown plugin: {name}"))),
-    }
+    Err(mlua::Error::RuntimeError(format!("unknown plugin: {name}")))
 }
 
 fn prepend_package_path(lua: &Lua, dir: &Path) -> mlua::Result<()> {
@@ -2049,8 +2043,6 @@ fn basename(path: &str) -> String {
 }
 
 const PRELUDE: &str = include_str!("lua/prelude.lua");
-
-const PACKAGED_PLUGIN_AGENTS: &str = include_str!("../plugins/agents/init.lua");
 
 const BUILTIN_KINDS: &str = include_str!("lua/builtin_kinds.lua");
 
@@ -2740,9 +2732,14 @@ mod tests {
 
         runtime
             .load_source(
+                "plugins/agents/init.lua",
+                include_str!("../plugins/agents/init.lua"),
+            )
+            .unwrap();
+        runtime
+            .load_source(
                 "test.lua",
                 r#"
-                tpane.use("agents")
                 tpane.statusline { right = { "agents" } }
                 "#,
             )

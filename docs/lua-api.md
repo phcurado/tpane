@@ -99,7 +99,7 @@ local presentation = tpane.state("approval")
 ```
 
 `color` is a tmux color. `glyph` is a marker used by Lua renderers such as the
-built-in `agents`/`companions` widgets and pane border renderer. Detection stays
+`companions` widget, pane border renderer, or plugins. Detection stays
 separate: a kind's `state` function may return any string. Returning `done`
 from detection is treated as `done_unseen` until the pane is focused.
 
@@ -319,7 +319,6 @@ Installed plugins live under `~/.local/share/tpane/plugins/<name>`. They are not
 auto-loaded. Reference them from config with `tpane.use`:
 
 ```lua
-tpane.use("agents") -- packaged with tpane
 tpane.use("foo", { repo = "https://github.com/example/tpane-plugin.git", branch = "main" })
 tpane.use("theme", { repo = "https://github.com/example/theme.git", tag = "v1.2.0" })
 tpane.use("tool", { repo = "https://github.com/example/mono.git", rev = "abc123", path = "plugins/tool" })
@@ -375,11 +374,8 @@ formats and styles. Table style keys mirror tmux attributes: `fg`, `bg`, `bold`,
 `dim`, `italics`, `blink`, `reverse`, `hidden`, `strikethrough`, `underscore`,
 `align`, and `fill`.
 
-Built-in widgets: `session`, `clock`, `companions`. The packaged `agents`
-plugin adds the `agents` widget and `agent_next` command when referenced with
-`tpane.use("agents")`. It shows agent panes in the current window by label and
-groups active/attention states in other windows as counts. Raw tmux format
-strings are also supported.
+Built-in widgets: `session`, `clock`, `companions`. Raw tmux format strings are
+also supported.
 
 Use `tpane.tabline` for the common window-status format without hand-writing
 nested tmux options:

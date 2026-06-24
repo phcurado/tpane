@@ -839,6 +839,10 @@ fn current_status_pane_id(snapshots: &[PaneSnapshot]) -> Option<String> {
 }
 
 fn keybind_command(command: &[String], context: bool) -> String {
+    if command == ["reload"] {
+        return "tpane reload".to_string();
+    }
+
     let mut parts = vec!["tpane".to_string(), "run".to_string()];
     parts.extend(command.iter().cloned());
     if context {
@@ -1079,6 +1083,10 @@ mod tests {
         assert_eq!(
             keybind_command(&["control".to_string()], false),
             "tpane run control"
+        );
+        assert_eq!(
+            keybind_command(&["reload".to_string()], false),
+            "tpane reload"
         );
     }
 

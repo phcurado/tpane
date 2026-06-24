@@ -261,32 +261,11 @@ fn referenced_plugins(load_plugins: bool) -> Result<HashSet<String>> {
 }
 
 fn plugin_status_lines(statuses: &[plugins::PluginStatus]) -> Vec<String> {
-    let packaged = statuses
-        .iter()
-        .filter(|status| packaged_plugin(status) && status.referenced)
-        .map(|status| status.name.as_str())
-        .collect::<Vec<_>>();
-    let git_statuses = statuses
-        .iter()
-        .filter(|status| !packaged_plugin(status))
-        .collect::<Vec<_>>();
-    let mut lines = Vec::new();
-
-    if git_statuses.is_empty() {
-        lines.push("No git plugins installed.".to_string());
+    if statuses.is_empty() {
+        vec!["No git plugins installed.".to_string()]
     } else {
-        lines.extend(git_statuses.into_iter().map(git_plugin_status_line));
+        statuses.iter().map(git_plugin_status_line).collect()
     }
-
-    if !packaged.is_empty() {
-        lines.push(format!("Packaged plugins: {}", packaged.join(", ")));
-    }
-
-    lines
-}
-
-fn packaged_plugin(status: &plugins::PluginStatus) -> bool {
-    status.url.is_none() && status.name == "agents" && !status.installed
 }
 
 fn git_plugin_status_line(status: &plugins::PluginStatus) -> String {
