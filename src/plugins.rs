@@ -75,13 +75,25 @@ fn data_dir() -> PathBuf {
 }
 
 fn config_dir() -> PathBuf {
-    std::env::var_os("TPANE_CONFIG_DIR")
+    if let Some(path) = std::env::var_os("TPANE_CONFIG_DIR") {
+        return PathBuf::from(path);
+    }
+
+    let home = config_home();
+    let tmux = home.join("tmux/tpane");
+    let legacy = home.join("tpane");
+    if tmux.exists() || !legacy.exists() {
+        tmux
+    } else {
+        legacy
+    }
+}
+
+fn config_home() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("XDG_CONFIG_HOME").map(|home| PathBuf::from(home).join("tpane"))
-        })
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/tpane")))
-        .unwrap_or_else(|| PathBuf::from(".config/tpane"))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_else(|| PathBuf::from(".config"))
 }
 
 pub fn lockfile_path() -> PathBuf {

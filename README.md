@@ -39,7 +39,7 @@ tpane.options {
 Or add keybinds and work with complex flows. Say you want a logs pane below the current pane. You want one key to show or hide it without killing the shell inside it, and another key to expand it.
 
 ```lua
--- ~/.config/tpane/init.lua
+-- ~/.config/tmux/tpane/init.lua
 tpane.register_pane("logs", {
   side = "bottom",
   size = "25%",
@@ -85,8 +85,10 @@ run-shell -b 'tpane'
 tpane loads top-level Lua files and plugin entrypoints under:
 
 ```text
-~/.config/tpane
+~/.config/tmux/tpane
 ```
+
+Set `TPANE_CONFIG_DIR` to use a different directory.
 
 Full Lua reference: [`docs/lua-api.md`](docs/lua-api.md).
 

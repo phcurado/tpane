@@ -1,6 +1,6 @@
 # Lua API
 
-tpane loads top-level `*.lua` files under `~/.config/tpane`.
+tpane loads top-level `*.lua` files under `~/.config/tmux/tpane`.
 Plugins load only when referenced with `tpane.use`.
 Other Lua files are libraries loaded with `require`.
 
@@ -312,7 +312,7 @@ tpane.panel {
 Use Lua's `require` for shared config code:
 
 ```lua
-local helper = require("lib.helper") -- ~/.config/tpane/lib/helper.lua
+local helper = require("lib.helper") -- ~/.config/tmux/tpane/lib/helper.lua
 ```
 
 Installed plugins live under `~/.local/share/tpane/plugins/<name>`. They are not
