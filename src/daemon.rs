@@ -20,6 +20,7 @@ use crate::tmux;
 
 const MAX_RUNTIME_ERRORS: usize = 50;
 const MAX_TMUX_LIVENESS_FAILURES: usize = 5;
+const SERVER_SENTINEL: &str = "@tpane_applied";
 
 #[derive(Debug, Clone)]
 struct StateRecord {
@@ -256,6 +257,7 @@ impl Daemon {
         }
 
         self.lua = rt;
+        self.ensure_server_cache_current()?;
         self.apply_status_options()?;
         self.load_errors = errors;
         self.runtime_errors.clear();
@@ -266,12 +268,35 @@ impl Daemon {
         Ok(())
     }
 
+    fn ensure_server_cache_current(&mut self) -> Result<()> {
+        if tmux::get_global_var(SERVER_SENTINEL).unwrap_or_default() != "1" {
+            self.reset_applied_cache();
+            tmux::set_global_var(SERVER_SENTINEL, "1")?;
+        }
+        Ok(())
+    }
+
+    fn reset_applied_cache(&mut self) {
+        self.prev_pane_ids.clear();
+        self.prev_windows.clear();
+        self.prev_active = None;
+        self.status_strip.clear();
+        self.status_left.clear();
+        self.status_right.clear();
+        self.status_position = None;
+        self.status_interval = None;
+        self.options.clear();
+        self.pane_borders.clear();
+        self.pane_vars.clear();
+    }
+
     fn config_changed(&self) -> Option<Vec<(PathBuf, SystemTime)>> {
         let sig = config_signature();
         (sig != self.config_sig).then_some(sig)
     }
 
     fn scan(&mut self) -> Result<usize> {
+        self.ensure_server_cache_current()?;
         let panes = tmux::list_panes()?;
         let count = panes.len();
         let mut snapshots = Vec::new();
@@ -966,6 +991,41 @@ mod tests {
             pane_vars: HashMap::new(),
             config_sig: Vec::new(),
         }
+    }
+
+    #[test]
+    fn reset_applied_cache_clears_tmux_debounce_state() {
+        let mut daemon = test_daemon("");
+        daemon.prev_pane_ids.insert("%1".to_string());
+        daemon.prev_windows.insert("@1".to_string());
+        daemon.prev_active = Some("%1".to_string());
+        daemon.status_strip = "strip".to_string();
+        daemon.status_left = "left".to_string();
+        daemon.status_right = "right".to_string();
+        daemon.status_position = Some("top".to_string());
+        daemon.status_interval = Some(1);
+        daemon.options.insert("mouse".to_string(), "on".to_string());
+        daemon
+            .pane_borders
+            .insert("%1".to_string(), "border".to_string());
+        daemon.pane_vars.insert(
+            ("%1".to_string(), "@tpane_kind".to_string()),
+            "pi".to_string(),
+        );
+
+        daemon.reset_applied_cache();
+
+        assert!(daemon.prev_pane_ids.is_empty());
+        assert!(daemon.prev_windows.is_empty());
+        assert!(daemon.prev_active.is_none());
+        assert!(daemon.status_strip.is_empty());
+        assert!(daemon.status_left.is_empty());
+        assert!(daemon.status_right.is_empty());
+        assert!(daemon.status_position.is_none());
+        assert!(daemon.status_interval.is_none());
+        assert!(daemon.options.is_empty());
+        assert!(daemon.pane_borders.is_empty());
+        assert!(daemon.pane_vars.is_empty());
     }
 
     #[test]

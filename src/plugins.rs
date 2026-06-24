@@ -1,10 +1,14 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+
+const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginSpec {
@@ -225,13 +229,10 @@ pub fn add(url: &str, name: Option<&str>, mut spec: PluginSpec) -> Result<PathBu
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let status = Command::new("git")
-        .args(clone_args(url, &dest, &spec))
-        .status()
-        .with_context(|| format!("failed to run git clone for {url}"))?;
-    if !status.success() {
-        bail!("git clone failed for {url}");
-    }
+    git_status(
+        Command::new("git").args(clone_args(url, &dest, &spec)),
+        &format!("git clone failed for {url}"),
+    )?;
 
     if let Some(commit) = locked_commit(&name, &spec)? {
         checkout(&dest, &commit)?;
@@ -406,15 +407,12 @@ fn update_one_with_spec(name: &str, spec: &PluginSpec) -> Result<()> {
 
 fn checkout(dir: &Path, rev: &str) -> Result<()> {
     validate_ref("rev", rev)?;
-    let status = Command::new("git")
-        .current_dir(dir)
-        .args(checkout_args(rev))
-        .status()
-        .with_context(|| format!("failed to run git checkout for {rev}"))?;
-    if !status.success() {
-        bail!("git checkout failed for {rev}");
-    }
-    Ok(())
+    git_status(
+        Command::new("git")
+            .current_dir(dir)
+            .args(checkout_args(rev)),
+        &format!("git checkout failed for {rev}"),
+    )
 }
 
 fn configure_sparse_checkout(dir: &Path, spec: &PluginSpec) -> Result<()> {
@@ -425,21 +423,47 @@ fn configure_sparse_checkout(dir: &Path, spec: &PluginSpec) -> Result<()> {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<()> {
-    let status = Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .status()
-        .with_context(|| format!("failed to run git in {}", dir.display()))?;
-    if !status.success() {
-        bail!("git command failed in {}", dir.display());
+    git_status(
+        Command::new("git").current_dir(dir).args(args),
+        &format!("git command failed in {}", dir.display()),
+    )
+}
+
+fn git_status(command: &mut Command, failure: &str) -> Result<()> {
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        command.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     }
-    Ok(())
+    let mut child = command.spawn().with_context(|| failure.to_string())?;
+    let deadline = Instant::now() + GIT_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            if status.success() {
+                return Ok(());
+            }
+            bail!(failure.to_string());
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "{failure}: timed out after {} seconds",
+                GIT_TIMEOUT.as_secs()
+            );
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn git_output(dir: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .current_dir(dir)
         .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .with_context(|| format!("failed to run git in {}", dir.display()))?;
     if !output.status.success() {

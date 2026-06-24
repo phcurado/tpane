@@ -1416,7 +1416,14 @@ fn load_plugin(lua: &Lua, name: &str, spec: &PluginSpec) -> mlua::Result<()> {
     plugins::validate_plugin_name(name).map_err(mlua_external)?;
     plugins::validate_spec(spec).map_err(mlua_external)?;
     if spec.url.is_some() {
+        let missing = !plugins::plugin_dir(name).exists();
+        if missing {
+            let _ = tmux::display_global_message(&format!("tpane: installing plugin {name}"));
+        }
         plugins::ensure(name, spec).map_err(mlua_external)?;
+        if missing {
+            let _ = tmux::display_global_message(&format!("tpane: installed plugin {name}"));
+        }
     } else {
         plugins::assert_compatible(name, spec).map_err(mlua_external)?;
     }
