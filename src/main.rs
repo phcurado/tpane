@@ -257,15 +257,44 @@ fn referenced_plugin_specs(load_plugins: bool) -> Result<HashMap<String, plugins
 }
 
 fn referenced_plugins(load_plugins: bool) -> Result<HashSet<String>> {
-    Ok(referenced_plugin_specs(load_plugins)?.into_keys().collect())
+    Ok(referenced_plugin_specs(load_plugins)?
+        .into_iter()
+        .filter(|(name, spec)| spec.url.is_some() || !builtin_plugin_name(name))
+        .map(|(name, _)| name)
+        .collect())
 }
 
 fn plugin_status_lines(statuses: &[plugins::PluginStatus]) -> Vec<String> {
-    if statuses.is_empty() {
-        vec!["No git plugins installed.".to_string()]
+    let builtins = statuses
+        .iter()
+        .filter(|status| builtin_plugin_status(status))
+        .map(|status| status.name.as_str())
+        .collect::<Vec<_>>();
+    let git_statuses = statuses
+        .iter()
+        .filter(|status| !builtin_plugin_status(status))
+        .collect::<Vec<_>>();
+    let mut lines = Vec::new();
+
+    if git_statuses.is_empty() {
+        lines.push("No git plugins installed.".to_string());
     } else {
-        statuses.iter().map(git_plugin_status_line).collect()
+        lines.extend(git_statuses.into_iter().map(git_plugin_status_line));
     }
+
+    if !builtins.is_empty() {
+        lines.push(format!("Built-in plugins: {}", builtins.join(", ")));
+    }
+
+    lines
+}
+
+fn builtin_plugin_status(status: &plugins::PluginStatus) -> bool {
+    status.referenced && status.url.is_none() && builtin_plugin_name(&status.name)
+}
+
+fn builtin_plugin_name(name: &str) -> bool {
+    matches!(name, "agents" | "navigator" | "yank")
 }
 
 fn git_plugin_status_line(status: &plugins::PluginStatus) -> String {

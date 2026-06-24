@@ -110,6 +110,7 @@ Plugins are loaded from Lua. If a git plugin is missing, tpane installs it the
 first time the config references it.
 
 ```lua
+tpane.use("navigator") -- built in
 tpane.use("foo", { repo = "https://github.com/example/tpane-plugin.git", branch = "main" })
 tpane.use("theme", { repo = "https://github.com/example/theme.git", tag = "v1.2.0" })
 tpane.use("local", { repo = "https://github.com/example/mono.git", rev = "abc123", path = "plugins/local" })

@@ -319,14 +319,17 @@ Installed plugins live under `~/.local/share/tpane/plugins/<name>`. They are not
 auto-loaded. Reference them from config with `tpane.use`:
 
 ```lua
+tpane.use("agents") -- built in
+tpane.use("navigator") -- built in
+tpane.use("yank") -- built in
 tpane.use("foo", { repo = "https://github.com/example/tpane-plugin.git", branch = "main" })
 tpane.use("theme", { repo = "https://github.com/example/theme.git", tag = "v1.2.0" })
 tpane.use("tool", { repo = "https://github.com/example/mono.git", rev = "abc123", path = "plugins/tool" })
 ```
 
 `repo` is the git repository URL (`url` also works). `branch`, `tag`, and `rev`
-are mutually exclusive. `path` is relative to the plugin repository and is useful
-for monorepos. If `repo` is set and the plugin is missing, tpane installs it
+are mutually exclusive. `path` is relative to the plugin repository and uses a
+sparse checkout. If `repo` is set and the plugin is missing, tpane installs it
 before loading it.
 
 Plugin commands are for maintenance; installation normally comes from `tpane.use`:
@@ -374,8 +377,9 @@ formats and styles. Table style keys mirror tmux attributes: `fg`, `bg`, `bold`,
 `dim`, `italics`, `blink`, `reverse`, `hidden`, `strikethrough`, `underscore`,
 `align`, and `fill`.
 
-Built-in widgets: `session`, `clock`, `companions`. Raw tmux format strings are
-also supported.
+Built-in widgets: `session`, `clock`, `companions`. The built-in `agents`
+plugin adds the `agents` widget and `agent_next` command when loaded. Raw tmux
+format strings are also supported.
 
 Use `tpane.tabline` for the common window-status format without hand-writing
 nested tmux options:

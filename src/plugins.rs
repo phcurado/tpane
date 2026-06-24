@@ -101,6 +101,9 @@ fn clone_args(url: &str, dest: &Path, spec: &PluginSpec) -> Vec<String> {
             "--single-branch".to_string(),
         ]);
     }
+    if spec.path.is_some() {
+        args.extend(["--filter=blob:none".to_string(), "--sparse".to_string()]);
+    }
     args.extend([
         "--".to_string(),
         url.to_string(),
@@ -173,8 +176,11 @@ pub fn validate_spec(spec: &PluginSpec) -> Result<()> {
 }
 
 fn validate_plugin_path(path: &str) -> Result<()> {
+    let raw = path;
     let path = Path::new(path);
-    if path.is_absolute()
+    if raw.is_empty()
+        || raw.starts_with('-')
+        || path.is_absolute()
         || path
             .components()
             .any(|component| matches!(component, std::path::Component::ParentDir))
@@ -234,6 +240,7 @@ pub fn add(url: &str, name: Option<&str>, mut spec: PluginSpec) -> Result<PathBu
     } else if let Some(rev) = &spec.rev {
         checkout(&dest, rev)?;
     }
+    configure_sparse_checkout(&dest, &spec)?;
 
     write_metadata(&name, &spec)?;
     write_lock_entry(&name, &spec, &current_commit(&dest)?)?;
@@ -391,6 +398,7 @@ fn update_one_with_spec(name: &str, spec: &PluginSpec) -> Result<()> {
     } else {
         git(&dir, &["pull", "--ff-only"])?;
     }
+    configure_sparse_checkout(&dir, spec)?;
 
     write_metadata(name, spec)?;
     write_lock_entry(name, spec, &current_commit(&dir)?)
@@ -405,6 +413,13 @@ fn checkout(dir: &Path, rev: &str) -> Result<()> {
         .with_context(|| format!("failed to run git checkout for {rev}"))?;
     if !status.success() {
         bail!("git checkout failed for {rev}");
+    }
+    Ok(())
+}
+
+fn configure_sparse_checkout(dir: &Path, spec: &PluginSpec) -> Result<()> {
+    if let Some(path) = &spec.path {
+        git(dir, &["sparse-checkout", "set", "--", path])?;
     }
     Ok(())
 }
@@ -615,6 +630,28 @@ mod tests {
                 "--branch",
                 "main",
                 "--single-branch",
+                "--",
+                "https://example.test/me/foo.git",
+                "/tmp/foo"
+            ]
+        );
+    }
+
+    #[test]
+    fn clone_args_use_sparse_clone_for_plugin_paths() {
+        assert_eq!(
+            clone_args(
+                "https://example.test/me/foo.git",
+                Path::new("/tmp/foo"),
+                &PluginSpec {
+                    path: Some("plugins/foo".to_string()),
+                    ..PluginSpec::default()
+                },
+            ),
+            vec![
+                "clone",
+                "--filter=blob:none",
+                "--sparse",
                 "--",
                 "https://example.test/me/foo.git",
                 "/tmp/foo"

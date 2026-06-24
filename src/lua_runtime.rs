@@ -1433,7 +1433,21 @@ fn load_plugin(lua: &Lua, name: &str, spec: &PluginSpec) -> mlua::Result<()> {
             .exec();
     }
 
-    Err(mlua::Error::RuntimeError(format!("unknown plugin: {name}")))
+    match name {
+        "agents" => lua
+            .load(BUILTIN_PLUGIN_AGENTS)
+            .set_name("builtin/plugins/agents/init.lua")
+            .exec(),
+        "navigator" => lua
+            .load(BUILTIN_PLUGIN_NAVIGATOR)
+            .set_name("builtin/plugins/navigator/init.lua")
+            .exec(),
+        "yank" => lua
+            .load(BUILTIN_PLUGIN_YANK)
+            .set_name("builtin/plugins/yank/init.lua")
+            .exec(),
+        _ => Err(mlua::Error::RuntimeError(format!("unknown plugin: {name}"))),
+    }
 }
 
 fn prepend_package_path(lua: &Lua, dir: &Path) -> mlua::Result<()> {
@@ -2043,6 +2057,10 @@ fn basename(path: &str) -> String {
 }
 
 const PRELUDE: &str = include_str!("lua/prelude.lua");
+
+const BUILTIN_PLUGIN_AGENTS: &str = include_str!("../plugins/agents/init.lua");
+const BUILTIN_PLUGIN_NAVIGATOR: &str = include_str!("../plugins/navigator/init.lua");
+const BUILTIN_PLUGIN_YANK: &str = include_str!("../plugins/yank/init.lua");
 
 const BUILTIN_KINDS: &str = include_str!("lua/builtin_kinds.lua");
 
