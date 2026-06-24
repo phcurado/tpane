@@ -1,8 +1,104 @@
 
+local pane_ref = tpane.pane
+
 tpane._pane_defs = {}
 tpane._workspaces = {}
 tpane._applied_workspaces = {}
 tpane.fmt = {}
+tpane.key = {}
+tpane.copy = {}
+tpane.window = {}
+tpane.pane = setmetatable({}, {
+  __call = function(_, id) return pane_ref(id) end,
+})
+
+local function raw(command)
+  return { __tpane_action = "raw", command = command }
+end
+
+function tpane.raw(command)
+  if type(command) == "table" then command = table.concat(command, " ; ") end
+  return raw(command)
+end
+
+function tpane.run(command)
+  local parts = {}
+  if type(command) == "table" then
+    for idx, part in ipairs(command) do parts[idx] = part end
+  else
+    for part in tostring(command):gmatch("%S+") do parts[#parts + 1] = part end
+  end
+  return { __tpane_action = "run", command = parts }
+end
+
+function tpane.key.prefix()
+  return raw("send-prefix")
+end
+
+local directions = {
+  left = "L",
+  right = "R",
+  up = "U",
+  down = "D",
+}
+
+function tpane.pane.select(direction)
+  return raw("select-pane -" .. assert(directions[direction], "unknown direction"))
+end
+
+function tpane.pane.resize(direction, amount)
+  return raw("resize-pane -" .. assert(directions[direction], "unknown direction") .. " " .. tostring(amount or 1))
+end
+
+function tpane.pane.split(direction, opts)
+  opts = opts or {}
+  local command = "split-window"
+  if direction == "left" then
+    command = command .. " -h -b"
+  elseif direction == "right" then
+    command = command .. " -h"
+  elseif direction == "up" then
+    command = command .. " -v -b"
+  elseif direction == "down" then
+    command = command .. " -v"
+  else
+    error("unknown direction")
+  end
+  if opts.cwd == "pane" then command = command .. ' -c "#{pane_current_path}"' end
+  return raw(command)
+end
+
+function tpane.copy.begin(opts)
+  opts = opts or {}
+  if opts.rectangle then
+    return raw("send-keys -X begin-selection \\; send-keys -X rectangle-toggle")
+  end
+  return raw("send-keys -X begin-selection")
+end
+
+function tpane.copy.rectangle()
+  return raw("send-keys -X rectangle-toggle")
+end
+
+function tpane.copy.copy()
+  return raw("send-keys -X copy-selection")
+end
+
+function tpane.window.new(opts)
+  opts = opts or {}
+  local command = "new-window"
+  if opts.cwd == "pane" then command = command .. ' -c "#{pane_current_path}"' end
+  return raw(command)
+end
+
+function tpane.window.swap(direction)
+  if direction == "next" or direction == "right" then
+    return raw("swap-window -t +1 ; select-window -t +1")
+  elseif direction == "prev" or direction == "left" then
+    return raw("swap-window -t -1 ; select-window -t -1")
+  end
+  error("unknown direction")
+end
 
 function tpane.fmt.prefix(on, off)
   return "#{?client_prefix," .. on .. "," .. (off or "") .. "}"

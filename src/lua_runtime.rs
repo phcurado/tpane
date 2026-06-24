@@ -23,12 +23,14 @@ pub struct LuaRuntime {
     commands: Rc<RefCell<HashMap<String, RegistryKey>>>,
     events: Rc<RefCell<HashMap<String, Vec<RegistryKey>>>>,
     keybinds: Rc<RefCell<Vec<Keybind>>>,
+    unbinds: Rc<RefCell<Vec<Unbind>>>,
     panels: Rc<RefCell<Vec<Panel>>>,
     widgets: Rc<RefCell<HashMap<String, RegistryKey>>>,
     pane_border: Rc<RefCell<Option<RegistryKey>>>,
     states: Rc<RefCell<HashMap<String, StatePresentation>>>,
     statusline: Rc<RefCell<Option<StatusLineDef>>>,
     options: Rc<RefCell<Vec<(String, String)>>>,
+    option_appends: Rc<RefCell<Vec<(String, String)>>>,
     used_plugins: Rc<RefCell<HashMap<String, PluginSpec>>>,
     load_plugins: bool,
     panes: Rc<RefCell<Vec<PaneSnapshot>>>,
@@ -49,8 +51,15 @@ pub struct Keybind {
     pub mode: String,
     pub key: String,
     pub command: Vec<String>,
+    pub raw: bool,
     pub context: bool,
     pub popup: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unbind {
+    pub mode: String,
+    pub key: String,
 }
 
 struct Panel {
@@ -139,12 +148,14 @@ impl LuaRuntime {
         let commands = Rc::new(RefCell::new(HashMap::new()));
         let events = Rc::new(RefCell::new(HashMap::new()));
         let keybinds = Rc::new(RefCell::new(Vec::new()));
+        let unbinds = Rc::new(RefCell::new(Vec::new()));
         let panels = Rc::new(RefCell::new(Vec::new()));
         let widgets = Rc::new(RefCell::new(HashMap::new()));
         let pane_border = Rc::new(RefCell::new(None));
         let states = Rc::new(RefCell::new(HashMap::new()));
         let statusline = Rc::new(RefCell::new(None));
         let options = Rc::new(RefCell::new(Vec::new()));
+        let option_appends = Rc::new(RefCell::new(Vec::new()));
         let used_plugins = Rc::new(RefCell::new(HashMap::new()));
         let runtime = Self {
             lua,
@@ -152,12 +163,14 @@ impl LuaRuntime {
             commands,
             events,
             keybinds,
+            unbinds,
             panels,
             widgets,
             pane_border,
             states,
             statusline,
             options,
+            option_appends,
             used_plugins,
             load_plugins,
             panes,
@@ -390,16 +403,39 @@ impl LuaRuntime {
         let key_commands = Rc::clone(&self.commands);
         let key_panes = Rc::clone(&self.panes);
         let generated_key_command = Rc::new(Cell::new(0usize));
-        let bind_key = self
+        let bind = self
             .lua
             .create_function(move |lua, args: mlua::MultiValue| {
                 let keybind =
-                    parse_bind_key(lua, &key_commands, &key_panes, &generated_key_command, args)?;
+                    parse_bind(lua, &key_commands, &key_panes, &generated_key_command, args)?;
                 keybinds.borrow_mut().push(keybind);
                 Ok(())
             })
             .map_err(lua_err)?;
-        tpane.set("bind_key", bind_key).map_err(lua_err)?;
+        tpane.set("bind", bind).map_err(lua_err)?;
+
+        let unbinds = Rc::clone(&self.unbinds);
+        let unbind = self
+            .lua
+            .create_function(move |_, args: mlua::MultiValue| {
+                let values = args.into_iter().collect::<Vec<_>>();
+                let (key, mode) = match values.as_slice() {
+                    [key] => (value_to_string(key, "key")?, "prefix".to_string()),
+                    [key, opts] => {
+                        let opts = parse_keybind_opts(opts, false)?;
+                        (value_to_string(key, "key")?, opts.mode)
+                    }
+                    _ => {
+                        return Err(mlua::Error::RuntimeError(
+                            "expected tpane.unbind(key[, opts])".to_string(),
+                        ));
+                    }
+                };
+                unbinds.borrow_mut().push(Unbind { mode, key });
+                Ok(())
+            })
+            .map_err(lua_err)?;
+        tpane.set("unbind", unbind).map_err(lua_err)?;
 
         let panels = Rc::clone(&self.panels);
         let register_panel = self
@@ -460,11 +496,41 @@ impl LuaRuntime {
         let set_options = self
             .lua
             .create_function(move |_, table: Table| {
-                *options.borrow_mut() = flatten_options(table)?;
+                options.borrow_mut().extend(flatten_options(table)?);
                 Ok(())
             })
             .map_err(lua_err)?;
         tpane.set("options", set_options).map_err(lua_err)?;
+
+        let option_appends = Rc::clone(&self.option_appends);
+        let append = self
+            .lua
+            .create_function(move |_, (name, value): (String, String)| {
+                option_appends
+                    .borrow_mut()
+                    .push((name.replace('_', "-"), value));
+                Ok(())
+            })
+            .map_err(lua_err)?;
+        tpane.set("append", append).map_err(lua_err)?;
+
+        let opt_options = Rc::clone(&self.options);
+        let opt = self.lua.create_table().map_err(lua_err)?;
+        let opt_meta = self.lua.create_table().map_err(lua_err)?;
+        opt_meta
+            .set(
+                "__newindex",
+                self.lua
+                    .create_function(move |lua, (_table, key, value): (Table, String, Value)| {
+                        let table = value_to_option_table(lua, &key, value)?;
+                        opt_options.borrow_mut().extend(flatten_options(table)?);
+                        Ok(())
+                    })
+                    .map_err(lua_err)?,
+            )
+            .map_err(lua_err)?;
+        opt.set_metatable(Some(opt_meta));
+        tpane.set("opt", opt).map_err(lua_err)?;
 
         let panes = Rc::clone(&self.panes);
         let panes_fn = self
@@ -517,6 +583,10 @@ impl LuaRuntime {
         self.keybinds.borrow().clone()
     }
 
+    pub fn unbinds(&self) -> Vec<Unbind> {
+        self.unbinds.borrow().clone()
+    }
+
     pub fn used_plugin_specs(&self) -> HashMap<String, PluginSpec> {
         self.used_plugins.borrow().clone()
     }
@@ -565,6 +635,12 @@ impl LuaRuntime {
         let mut options = self.options.borrow().clone();
         options.sort_by(|a, b| a.0.cmp(&b.0));
         options
+    }
+
+    pub fn option_appends(&self) -> Vec<(String, String)> {
+        let mut appends = self.option_appends.borrow().clone();
+        appends.sort_by(|a, b| a.0.cmp(&b.0));
+        appends
     }
 
     pub fn state_presentation(&self, state: &str) -> Option<StatePresentation> {
@@ -830,6 +906,12 @@ fn parse_status_slot(value: Value) -> mlua::Result<Option<Vec<String>>> {
     }
 }
 
+fn value_to_option_table(lua: &Lua, key: &str, value: Value) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set(key, value)?;
+    Ok(table)
+}
+
 fn flatten_options(table: Table) -> mlua::Result<Vec<(String, String)>> {
     let mut options = Vec::new();
     flatten_option_table(&table, &[], &mut options)?;
@@ -861,7 +943,9 @@ fn flatten_option_table(
             Value::String(value) => options.push((name, value.to_string_lossy())),
             Value::Integer(value) => options.push((name, value.to_string())),
             Value::Number(value) => options.push((name, value.to_string())),
-            Value::Boolean(value) => options.push((name, value.to_string())),
+            Value::Boolean(value) => {
+                options.push((name, if value { "on" } else { "off" }.to_string()))
+            }
             Value::Table(table) if name.ends_with("-style") => {
                 options.push((name, style_spec(&table)?));
             }
@@ -994,7 +1078,7 @@ fn parse_optional_command(value: Value) -> mlua::Result<Option<Vec<String>>> {
     }
 }
 
-fn parse_bind_key(
+fn parse_bind(
     lua: &Lua,
     commands: &Rc<RefCell<HashMap<String, RegistryKey>>>,
     panes: &Rc<RefCell<Vec<PaneSnapshot>>>,
@@ -1003,33 +1087,41 @@ fn parse_bind_key(
 ) -> mlua::Result<Keybind> {
     let values = args.into_iter().collect::<Vec<_>>();
     match values.as_slice() {
-        [key, command] => Ok(Keybind {
-            mode: "prefix".to_string(),
-            key: value_to_string(key, "key")?,
-            command: parse_bind_command_value(lua, commands, panes, generated, command.clone())?,
-            context: true,
-            popup: false,
-        }),
+        [key, command] => {
+            let command =
+                parse_bind_command_value(lua, commands, panes, generated, command.clone())?;
+            Ok(Keybind {
+                mode: "prefix".to_string(),
+                key: value_to_string(key, "key")?,
+                raw: command.raw,
+                command: command.command,
+                context: command.context.unwrap_or(true),
+                popup: false,
+            })
+        }
         [key, command, opts] => {
             let opts = parse_keybind_opts(opts, true)?;
+            let command =
+                parse_bind_command_value(lua, commands, panes, generated, command.clone())?;
             Ok(Keybind {
                 mode: opts.mode,
                 key: value_to_string(key, "key")?,
-                command: parse_bind_command_value(
-                    lua,
-                    commands,
-                    panes,
-                    generated,
-                    command.clone(),
-                )?,
-                context: opts.context,
+                raw: command.raw,
+                command: command.command,
+                context: command.context.unwrap_or(opts.context),
                 popup: opts.popup,
             })
         }
         _ => Err(mlua::Error::RuntimeError(
-            "expected tpane.bind_key(key, command[, opts])".to_string(),
+            "expected tpane.bind(key, action[, opts])".to_string(),
         )),
     }
+}
+
+struct ParsedBindCommand {
+    command: Vec<String>,
+    raw: bool,
+    context: Option<bool>,
 }
 
 fn parse_bind_command_value(
@@ -1038,7 +1130,7 @@ fn parse_bind_command_value(
     panes: &Rc<RefCell<Vec<PaneSnapshot>>>,
     generated: &Rc<Cell<usize>>,
     value: Value,
-) -> mlua::Result<Vec<String>> {
+) -> mlua::Result<ParsedBindCommand> {
     match value {
         Value::Function(function) => {
             let idx = generated.get() + 1;
@@ -1056,9 +1148,49 @@ fn parse_bind_command_value(
             commands
                 .borrow_mut()
                 .insert(name.clone(), lua.create_registry_value(handler)?);
-            Ok(vec![name])
+            Ok(ParsedBindCommand {
+                command: vec![name],
+                raw: false,
+                context: None,
+            })
         }
-        other => parse_keybind_command(other),
+        Value::Table(table) => parse_action_table(table),
+        Value::String(command) => Ok(ParsedBindCommand {
+            command: vec![command.to_string_lossy()],
+            raw: true,
+            context: Some(false),
+        }),
+        other => Err(mlua::Error::RuntimeError(format!(
+            "expected bind action, got {other:?}"
+        ))),
+    }
+}
+
+fn parse_action_table(table: Table) -> mlua::Result<ParsedBindCommand> {
+    match table.get::<Option<String>>("__tpane_action")?.as_deref() {
+        Some("raw") => Ok(ParsedBindCommand {
+            command: vec![table.get::<String>("command")?],
+            raw: true,
+            context: Some(false),
+        }),
+        Some("run") => Ok(ParsedBindCommand {
+            command: table
+                .get::<Table>("command")?
+                .sequence_values::<String>()
+                .collect::<mlua::Result<Vec<_>>>()?,
+            raw: false,
+            context: None,
+        }),
+        Some(other) => Err(mlua::Error::RuntimeError(format!(
+            "unknown bind action: {other}"
+        ))),
+        None => Ok(ParsedBindCommand {
+            command: table
+                .sequence_values::<String>()
+                .collect::<mlua::Result<Vec<_>>>()?,
+            raw: false,
+            context: None,
+        }),
     }
 }
 
@@ -1077,10 +1209,10 @@ fn parse_keybind_opts(value: &Value, default_context: bool) -> mlua::Result<Keyb
                 .map(|pair| pair.map(|(key, _)| key))
             {
                 match key?.as_str() {
-                    "popup" | "context" | "prefix" | "table" => {}
+                    "popup" | "context" | "prefix" | "table" | "mode" => {}
                     other => {
                         return Err(mlua::Error::RuntimeError(format!(
-                            "unknown bind_key option: {other}"
+                            "unknown bind option: {other}"
                         )));
                     }
                 }
@@ -1091,10 +1223,17 @@ fn parse_keybind_opts(value: &Value, default_context: bool) -> mlua::Result<Keyb
             } else {
                 default_context
             });
-            let mode = match table.get::<Option<String>>("table")? {
-                Some(table) => table,
-                None if table.get::<Option<bool>>("prefix")? == Some(false) => "root".to_string(),
-                None => "prefix".to_string(),
+            let mode = match (
+                table.get::<Option<String>>("table")?,
+                table.get::<Option<String>>("mode")?,
+            ) {
+                (Some(table), _) => table,
+                (None, Some(mode)) if mode == "copy" => "copy-mode-vi".to_string(),
+                (None, Some(mode)) => mode,
+                (None, None) if table.get::<Option<bool>>("prefix")? == Some(false) => {
+                    "root".to_string()
+                }
+                (None, None) => "prefix".to_string(),
             };
             Ok(KeybindOpts {
                 mode,
@@ -2000,15 +2139,17 @@ mod tests {
     }
 
     #[test]
-    fn bind_key_matches_tmux_shape() {
+    fn bind_accepts_run_and_raw_actions() {
         let (runtime, _) = runtime();
         runtime
             .load_source(
                 "test.lua",
                 r#"
-                tpane.bind_key("a", { "pi" })
-                tpane.bind_key("A", { "pi", "expand" })
-                tpane.bind_key("M-a", "pi expand", { prefix = false })
+                tpane.bind("a", tpane.run("pi"))
+                tpane.bind("A", tpane.run({ "pi", "expand" }))
+                tpane.bind("M-a", tpane.pane.select("left"), { prefix = false })
+                tpane.bind("%", tpane.pane.split("right", { cwd = "pane" }))
+                tpane.bind("C-S-l", tpane.window.swap("next"), { prefix = false })
                 "#,
             )
             .unwrap();
@@ -2020,6 +2161,7 @@ mod tests {
                     mode: "prefix".to_string(),
                     key: "a".to_string(),
                     command: vec!["pi".to_string()],
+                    raw: false,
                     context: true,
                     popup: false,
                 },
@@ -2027,14 +2169,32 @@ mod tests {
                     mode: "prefix".to_string(),
                     key: "A".to_string(),
                     command: vec!["pi".to_string(), "expand".to_string()],
+                    raw: false,
                     context: true,
                     popup: false,
                 },
                 Keybind {
                     mode: "root".to_string(),
                     key: "M-a".to_string(),
-                    command: vec!["pi".to_string(), "expand".to_string()],
-                    context: true,
+                    command: vec!["select-pane -L".to_string()],
+                    raw: true,
+                    context: false,
+                    popup: false,
+                },
+                Keybind {
+                    mode: "prefix".to_string(),
+                    key: "%".to_string(),
+                    command: vec!["split-window -h -c \"#{pane_current_path}\"".to_string()],
+                    raw: true,
+                    context: false,
+                    popup: false,
+                },
+                Keybind {
+                    mode: "root".to_string(),
+                    key: "C-S-l".to_string(),
+                    command: vec!["swap-window -t +1 ; select-window -t +1".to_string()],
+                    raw: true,
+                    context: false,
                     popup: false,
                 },
             ]
@@ -2042,17 +2202,17 @@ mod tests {
     }
 
     #[test]
-    fn bind_key_opts_select_prefix_root_or_table() {
+    fn bind_opts_select_prefix_root_or_table() {
         let (runtime, _) = runtime();
         runtime
             .load_source(
                 "test.lua",
                 r#"
-                tpane.bind_key("C-g", function() end, { prefix = false })
-                tpane.bind_key("M-h", function() end)
-                tpane.bind_key("v", function() end, { table = "copy-mode-vi" })
-                tpane.bind_key("x", function() end, { prefix = false, table = "copy-mode-vi" })
-                tpane.bind_key("C-a", function() end, { prefix = true })
+                tpane.bind("C-g", function() end, { prefix = false })
+                tpane.bind("M-h", function() end)
+                tpane.bind("v", function() end, { mode = "copy" })
+                tpane.bind("x", function() end, { prefix = false, table = "copy-mode-vi" })
+                tpane.bind("C-a", function() end, { prefix = true })
                 "#,
             )
             .unwrap();
@@ -2322,13 +2482,13 @@ mod tests {
     }
 
     #[test]
-    fn bind_key_accepts_function_and_registers_internal_command() {
+    fn bind_accepts_function_and_registers_internal_command() {
         let (runtime, _) = runtime();
         runtime
             .load_source(
                 "test.lua",
                 r#"
-                tpane.bind_key("M-e", function()
+                tpane.bind("M-e", function()
                   return "ok"
                 end, { prefix = false })
                 "#,
@@ -2349,16 +2509,16 @@ mod tests {
     }
 
     #[test]
-    fn bind_key_rejects_unknown_options() {
+    fn bind_rejects_unknown_options() {
         let (runtime, _) = runtime();
         let error = runtime
             .load_source(
                 "test.lua",
-                r#"tpane.bind_key("a", { "pi" }, { desc = "unused" })"#,
+                r#"tpane.bind("a", tpane.run("pi"), { desc = "unused" })"#,
             )
             .unwrap_err()
             .to_string();
-        assert!(error.contains("unknown bind_key option: desc"));
+        assert!(error.contains("unknown bind option: desc"));
     }
 
     #[test]

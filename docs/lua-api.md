@@ -188,11 +188,11 @@ tpane.register_pane("logs", {
 Bind keys to it:
 
 ```lua
-tpane.bind_key("M-e", function(pane)
+tpane.bind("M-e", function(pane)
   tpane.toggle(pane, "logs")
 end, { prefix = false })
 
-tpane.bind_key("M-E", function(pane)
+tpane.bind("M-E", function(pane)
   tpane.expand(pane, "logs")
 end, { prefix = false })
 ```
@@ -231,10 +231,24 @@ local logs = tpane.split(pane, {
 
 It returns a pane handle.
 
+## tmux.conf equivalents
+
+| tmux.conf                                                | Lua                                                                       |
+| -------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `set -g mouse on`                                        | `tpane.opt.mouse = true`                                                  |
+| `set -g history-limit 5000`                              | `tpane.opt.history_limit = 5000`                                          |
+| `set -ga update-environment TERM`                        | `tpane.append("update_environment", "TERM")`                              |
+| `unbind C-b`                                             | `tpane.unbind("C-b")`                                                     |
+| `bind h select-pane -L`                                  | `tpane.bind("h", tpane.pane.select("left"))`                              |
+| `bind -n M-Left resize-pane -L 10`                       | `tpane.bind("M-Left", tpane.pane.resize("left", 10), { prefix = false })` |
+| `bind -T copy-mode-vi y send-keys -X copy-selection`     | `tpane.bind("y", tpane.copy.copy(), { mode = "copy" })`                   |
+| `bind % split-window -h -c "#{pane_current_path}"`       | `tpane.bind("%", tpane.pane.split("right", { cwd = "pane" }))`            |
+| `bind -n C-S-l swap-window -t +1 \; select-window -t +1` | `tpane.bind("C-S-l", tpane.window.swap("next"), { prefix = false })`      |
+
 ## Key bindings
 
 ```lua
-tpane.bind_key("a", function(pane)
+tpane.bind("a", function(pane)
   tpane.toggle(pane, "logs")
 end)
 ```
@@ -244,27 +258,24 @@ The function receives the pane that invoked the binding.
 Bind to a command instead:
 
 ```lua
-tpane.bind_key("a", { "hello" })
-tpane.bind_key("Space", { "control" }, { popup = true })
+tpane.bind("a", tpane.run("hello"))
+tpane.bind("Space", tpane.run("control"), { popup = true })
 ```
 
-Options: `popup`, `context`, `prefix`, `table`.
+Options: `popup`, `context`, `prefix`, `mode`, `table`.
 
-By default, bindings use tmux's prefix table (`bind-key a`). Use
-`prefix = false` for a no-prefix binding (`bind-key -n C-g`), or `table` for a
-named tmux table (`bind-key -T copy-mode-vi v`):
+By default, bindings use tmux's prefix table. Use `prefix = false` for a
+no-prefix binding. Use `mode = "copy"` for copy mode.
 
 ```lua
-tpane.bind_key("C-g", function(pane)
+tpane.bind("C-g", function(pane)
   tpane.expand(pane)
 end, { prefix = false })
 
-tpane.bind_key("v", { "copy" }, { table = "copy-mode-vi" })
+tpane.bind("h", tpane.pane.select("left"))
+tpane.bind("M-Left", tpane.pane.resize("left", 10), { prefix = false })
+tpane.bind("v", tpane.copy.begin { rectangle = true }, { mode = "copy" })
 ```
-
-Do not use `tpane.bind_key` for keys you press repeatedly, such as pane
-movement or resize. Those should stay as plain tmux bindings because
-`tpane.bind_key` starts a `tpane run ...` process on each keypress.
 
 ## Commands
 
@@ -290,7 +301,7 @@ tpane.panel {
   title = "Workspace",
   cards = function()
     return {
-      { title = "logs", tag = "key", enter = { "hello" } },
+      { title = "logs", tag = "key", enter = tpane.run("hello") },
     }
   end,
 }
@@ -383,7 +394,15 @@ tpane.tabline {
 
 ## Tmux options
 
-Set static tmux options from Lua with nested keys. Underscores become dashes:
+Set options directly:
+
+```lua
+tpane.opt.mouse = true
+tpane.opt.history_limit = 5000
+tpane.opt.mode_keys = "vi"
+```
+
+Or set a batch with nested keys. Underscores become dashes:
 
 ```lua
 tpane.options {
@@ -449,7 +468,7 @@ tpane.fmt.when("window_zoomed_flag", "Z", "")
 
 The intended public Lua surface is: `tpane.use`, `tpane.kind`, `tpane.state`,
 `tpane.widget`, `tpane.statusline`, `tpane.tabline`, `tpane.options`,
-`tpane.on`, `tpane.command`, `tpane.panel`, `tpane.bind_key`, `tpane.panes`,
+`tpane.on`, `tpane.command`, `tpane.panel`, `tpane.bind`, `tpane.panes`,
 `tpane.find`, `tpane.find_all`, pane objects/handles, reusable pane helpers
 (`register_pane`, `split`, `toggle`, `show`, `hide`, `expand`), `tpane.tmux`,
 `tpane.fmt`, and `tpane.store`.

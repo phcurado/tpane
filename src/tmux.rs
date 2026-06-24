@@ -88,8 +88,12 @@ fn nonempty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-pub fn bind_key(mode: &str, key: &str, command: &str, popup: bool) -> Result<()> {
-    tmux_owned(bind_key_args(mode, key, command, popup)).map(|_| ())
+pub fn bind_key(mode: &str, key: &str, command: &str, popup: bool, raw: bool) -> Result<()> {
+    tmux_owned(bind_key_args(mode, key, command, popup, raw)).map(|_| ())
+}
+
+pub fn unbind_key(mode: &str, key: &str) -> Result<()> {
+    tmux_owned(unbind_key_args(mode, key)).map(|_| ())
 }
 
 pub struct NewWindowOptions {
@@ -152,7 +156,7 @@ fn send_keys_args(target: &str, keys: &str, enter: bool) -> Vec<String> {
     args
 }
 
-fn bind_key_args(mode: &str, key: &str, command: &str, popup: bool) -> Vec<String> {
+fn bind_key_args(mode: &str, key: &str, command: &str, popup: bool, raw: bool) -> Vec<String> {
     let mut args = vec!["bind-key".to_string()];
     match mode {
         "prefix" | "normal" | "n" => {}
@@ -173,6 +177,8 @@ fn bind_key_args(mode: &str, key: &str, command: &str, popup: bool) -> Vec<Strin
             "80%".to_string(),
             command.to_string(),
         ]);
+    } else if raw {
+        args.push(command.to_string());
     } else {
         args.extend([
             "run-shell".to_string(),
@@ -183,8 +189,30 @@ fn bind_key_args(mode: &str, key: &str, command: &str, popup: bool) -> Vec<Strin
     args
 }
 
+fn unbind_key_args(mode: &str, key: &str) -> Vec<String> {
+    let mut args = vec!["unbind-key".to_string()];
+    match mode {
+        "prefix" | "normal" | "n" => {}
+        "root" => args.push("-n".to_string()),
+        table => {
+            args.push("-T".to_string());
+            args.push(table.to_string());
+        }
+    }
+    args.push(key.to_string());
+    args
+}
+
 pub fn set_global_var(name: &str, value: &str) -> Result<()> {
     tmux(&["set-option", "-g", name, value]).map(|_| ())
+}
+
+pub fn append_global_var(name: &str, value: &str) -> Result<()> {
+    tmux(&["set-option", "-ga", name, value]).map(|_| ())
+}
+
+pub fn get_global_var(name: &str) -> Result<String> {
+    tmux(&["show-option", "-gqv", name])
 }
 
 pub fn unset_global_var(name: &str) -> Result<()> {
@@ -598,15 +626,15 @@ mod tests {
     #[test]
     fn bind_key_args_are_built_without_running_tmux() {
         assert_eq!(
-            bind_key_args("prefix", "A", "tpane pi expand", false),
+            bind_key_args("prefix", "A", "tpane pi expand", false, false),
             vec!["bind-key", "A", "run-shell", "-b", "tpane pi expand"]
         );
         assert_eq!(
-            bind_key_args("root", "M-a", "tpane pi", false),
+            bind_key_args("root", "M-a", "tpane pi", false, false),
             vec!["bind-key", "-n", "M-a", "run-shell", "-b", "tpane pi"]
         );
         assert_eq!(
-            bind_key_args("copy-mode-vi", "v", "tpane copy", false),
+            bind_key_args("copy-mode-vi", "v", "tpane copy", false, false),
             vec![
                 "bind-key",
                 "-T",
@@ -618,7 +646,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            bind_key_args("prefix", "Space", "tpane control", true),
+            bind_key_args("prefix", "Space", "tpane control", true, false),
             vec![
                 "bind-key",
                 "Space",
@@ -630,6 +658,10 @@ mod tests {
                 "80%",
                 "tpane control"
             ]
+        );
+        assert_eq!(
+            bind_key_args("prefix", "h", "select-pane -L", false, true),
+            vec!["bind-key", "h", "select-pane -L"]
         );
     }
 

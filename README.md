@@ -46,11 +46,11 @@ tpane.register_pane("logs", {
   command = "tail -f logs/app.log",
 })
 
-tpane.bind_key("M-e", function(pane)
+tpane.bind("M-e", function(pane)
   tpane.toggle(pane, "logs")
 end, { prefix = false })
 
-tpane.bind_key("M-E", function(pane)
+tpane.bind("M-E", function(pane)
   tpane.expand(pane, "logs")
 end, { prefix = false })
 ```

@@ -232,12 +232,24 @@ impl Daemon {
             return Err(error);
         }
 
+        for unbind in rt.unbinds() {
+            if let Err(error) = tmux::unbind_key(&unbind.mode, &unbind.key) {
+                errors.push(format!("unbind {} {}: {error}", unbind.mode, unbind.key));
+            }
+        }
+
         for keybind in rt.keybinds() {
+            let command = if keybind.raw {
+                keybind.command.join(" ")
+            } else {
+                keybind_command(&keybind.command, keybind.context)
+            };
             if let Err(error) = tmux::bind_key(
                 &keybind.mode,
                 &keybind.key,
-                &keybind_command(&keybind.command, keybind.context),
+                &command,
                 keybind.popup,
+                keybind.raw,
             ) {
                 errors.push(format!("keybind {} {}: {error}", keybind.mode, keybind.key));
             }
@@ -391,6 +403,13 @@ impl Daemon {
             if self.options.get(&name) != Some(&value) {
                 tmux::set_global_var(&name, &value)?;
                 self.options.insert(name, value);
+            }
+        }
+
+        for (name, value) in self.lua.option_appends() {
+            let current = tmux::get_global_var(&name).unwrap_or_default();
+            if !current.contains(&value) {
+                tmux::append_global_var(&name, &value)?;
             }
         }
 
