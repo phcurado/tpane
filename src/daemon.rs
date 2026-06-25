@@ -463,11 +463,21 @@ impl Daemon {
         let key = (pane.id.clone(), "@tpane_tag".to_string());
         match detected {
             Some(tag) => {
-                if pane.tag.as_deref() != Some(tag) {
-                    self.set_pane_var(&pane.id, "@tpane_tag", tag)?;
-                } else {
-                    self.pane_vars.insert(key, tag.to_string());
+                if let Some(existing) = pane.tag.as_deref() {
+                    let owned = self
+                        .pane_vars
+                        .get(&key)
+                        .is_some_and(|value| value == existing);
+                    if !owned {
+                        return Ok(Some(existing.to_string()));
+                    }
+                    if existing != tag {
+                        self.set_pane_var(&pane.id, "@tpane_tag", tag)?;
+                    }
+                    return Ok(Some(tag.to_string()));
                 }
+
+                self.set_pane_var(&pane.id, "@tpane_tag", tag)?;
                 Ok(Some(tag.to_string()))
             }
             None => {
@@ -1119,6 +1129,22 @@ mod tests {
         }
     }
 
+    fn tmux_pane_with_tag(tag: Option<&str>) -> tmux::PaneInfo {
+        tmux::PaneInfo {
+            id: "%1".to_string(),
+            pid: 123,
+            cwd: "/tmp".to_string(),
+            command: "zsh".to_string(),
+            session: "s".to_string(),
+            window: "@1".to_string(),
+            active: true,
+            zoomed: false,
+            tag: tag.map(str::to_string),
+            home: None,
+            state: None,
+        }
+    }
+
     fn test_daemon(lua_source: &str) -> Daemon {
         let panes = Rc::new(RefCell::new(Vec::new()));
         let store = Rc::new(RefCell::new(Store::memory()));
@@ -1158,6 +1184,38 @@ mod tests {
             pane_vars: HashMap::new(),
             config_sig: Vec::new(),
         }
+    }
+
+    #[test]
+    fn detected_tag_does_not_overwrite_external_pane_tag() {
+        let mut daemon = test_daemon("");
+        let pane = tmux_pane_with_tag(Some("manual"));
+
+        let tag = daemon.update_pane_tag(&pane, Some("detected")).unwrap();
+
+        assert_eq!(tag.as_deref(), Some("manual"));
+        assert!(daemon.pane_vars.is_empty());
+    }
+
+    #[test]
+    fn detected_tag_keeps_owned_pane_tag() {
+        let mut daemon = test_daemon("");
+        daemon.pane_vars.insert(
+            ("%1".to_string(), "@tpane_tag".to_string()),
+            "detected".to_string(),
+        );
+        let pane = tmux_pane_with_tag(Some("detected"));
+
+        let tag = daemon.update_pane_tag(&pane, Some("detected")).unwrap();
+
+        assert_eq!(tag.as_deref(), Some("detected"));
+        assert_eq!(
+            daemon
+                .pane_vars
+                .get(&("%1".to_string(), "@tpane_tag".to_string()))
+                .map(String::as_str),
+            Some("detected")
+        );
     }
 
     #[test]
