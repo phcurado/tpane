@@ -249,7 +249,7 @@ background on their own interval and return a handle that widgets can render.
 Status rendering does not block on the command.
 
 ```lua
-local uptime = tpane.job("uptime", {
+local uptime = tpane.job({
   every = "1m",
   timeout = "5s",
   cmd = "uptime",
@@ -264,8 +264,8 @@ tpane.statusline {
 `timeout` defaults to `10s`.
 
 ```lua
-tpane.job("battery", { every = 30, timeout = "5s", cmd = "acpi -b" })
-tpane.job("music", { every = "5s", timeout = "2s", cmd = "playerctl metadata title" })
+tpane.job({ every = 30, timeout = "5s", cmd = "acpi -b" })
+tpane.job({ every = "5s", timeout = "2s", cmd = "playerctl metadata title" })
 ```
 
 ### Styled parts
@@ -339,8 +339,18 @@ tpane plugin remove NAME # remove one installed plugin
 
 ## Commands
 
-Register commands when you want a Lua function callable from the CLI or from a
-key binding.
+Use command handles for local key bindings:
+
+```lua
+local hello = tpane.command(function(args)
+  return "hello " .. (args[1] or "")
+end)
+
+tpane.bind("H", hello)
+```
+
+Use named commands only when you want a Lua function callable from the CLI or
+from `tpane.run("name")`:
 
 ```lua
 tpane.command("hello", function(args)
@@ -348,17 +358,11 @@ tpane.command("hello", function(args)
 end)
 ```
 
-Run it:
-
 ```sh
 tpane run hello world
 ```
 
-Bind it:
-
-```lua
-tpane.bind("H", tpane.run("hello"))
-```
+Named commands must be unique. Registering the same name twice is an error.
 
 ## Reusable panes
 
@@ -575,18 +579,23 @@ tpane.panel {
 
 ## Workspaces
 
-Declare reusable layouts in Lua:
+A workspace is a named tmux layout. You can call `tpane.apply_workspace(name)` from a command or key binding to activate the workspace:
 
 ```lua
 tpane.workspace {
   name = "dev",
   windows = {
     { name = "app", command = "zsh" },
-    { name = "logs", panes = { { side = "bottom", size = "30%", command = "tail -f app.log" } } },
+    {
+      name = "logs",
+      panes = {
+        { side = "bottom", size = "30%", command = "tail -f app.log" },
+      },
+    },
   },
 }
 
-tpane.command("dev", function()
+tpane.bind("D", function()
   tpane.apply_workspace("dev")
 end)
 ```
@@ -619,41 +628,41 @@ tpane.tmux.display { target = pane.id, message = "message" }
 
 ## Public API
 
-Main API:
-
-```text
-tpane.use
-tpane.opt
-tpane.append
-tpane.options
-tpane.bind
-tpane.unbind
-tpane.run
-tpane.raw
-tpane.pane.*
-tpane.window.*
-tpane.copy.*
-tpane.key.*
-tpane.widget
-tpane.widgets
-tpane.job
-tpane.statusline
-tpane.tabline
-tpane.command
-tpane.panel
-tpane.register_pane
-tpane.split
-tpane.toggle
-tpane.show
-tpane.hide
-tpane.expand
-tpane.panes
-tpane.find
-tpane.find_all
-tpane.kind
-tpane.state
-tpane.on
-tpane.store
-tpane.tmux
-tpane.fmt
-```
+| API                                         | Purpose                                                          |
+| ------------------------------------------- | ---------------------------------------------------------------- |
+| `tpane.use(name_or_spec)`                   | Load a built-in or git plugin.                                   |
+| `tpane.opt`                                 | Set tmux options with assignment, like `tpane.opt.mouse = true`. |
+| `tpane.append(name, value)`                 | Append to tmux options such as `update-environment`.             |
+| `tpane.options(table)`                      | Set nested tmux options.                                         |
+| `tpane.bind(key, action, opts)`             | Bind a key.                                                      |
+| `tpane.unbind(key, opts)`                   | Remove a key binding.                                            |
+| `tpane.run(command)`                        | Build an action that runs a Lua command.                         |
+| `tpane.raw(command)`                        | Build an action from raw tmux command text.                      |
+| `tpane.pane.*`                              | Pane actions, lookup, and pane handles.                          |
+| `tpane.window.*`                            | Window actions.                                                  |
+| `tpane.copy.*`                              | Copy-mode actions.                                               |
+| `tpane.key.*`                               | Key helpers such as `tpane.key.prefix()`.                        |
+| `tpane.widget(fn)`                          | Create a widget handle.                                          |
+| `tpane.widgets.*`                           | Built-in widget handles and factories.                           |
+| `tpane.job(opts)`                           | Run shell-backed widget data in the background.                  |
+| `tpane.statusline(opts)`                    | Configure the tmux statusline.                                   |
+| `tpane.tabline(opts)`                       | Configure tmux window tabs.                                      |
+| `tpane.command(fn)` / `tpane.command(name, fn)` | Create a command handle or named CLI command.                |
+| `tpane.panel(opts)`                         | Register a command/control panel.                                |
+| `tpane.register_pane(name, opts)`           | Register a reusable pane definition.                             |
+| `tpane.split(target, opts)`                 | Split/open a reusable pane.                                      |
+| `tpane.toggle(target, opts)`                | Toggle a reusable pane.                                          |
+| `tpane.show(target, opts)`                  | Show a reusable pane.                                            |
+| `tpane.hide(target, opts)`                  | Hide a reusable pane.                                            |
+| `tpane.expand(target, opts)`                | Zoom or expand a pane.                                           |
+| `tpane.workspace(def)`                      | Register a named layout.                                         |
+| `tpane.apply_workspace(name)`               | Apply a registered layout once.                                  |
+| `tpane.panes()`                             | Return current pane objects.                                     |
+| `tpane.find(query)`                         | Find one pane by fields.                                         |
+| `tpane.find_all(query)`                     | Find all panes by fields.                                        |
+| `tpane.kind(name, opts)`                    | Register pane detection.                                         |
+| `tpane.state(name, opts)`                   | Register state presentation.                                     |
+| `tpane.on(event, fn)`                       | Register an event handler.                                       |
+| `tpane.store`                               | Persistent Lua key-value store.                                  |
+| `tpane.tmux`                                | Low-level tmux helpers.                                          |
+| `tpane.fmt`                                 | tmux format helpers.                                             |

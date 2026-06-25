@@ -18,13 +18,6 @@ tpane.widgets.prefix = tpane.widget(function()
   return tpane.fmt.prefix("  ", "  ")
 end)
 
-local job_id = 0
-
-local function next_job_name(prefix)
-  job_id = job_id + 1
-  return "__tpane_" .. prefix .. "_" .. tostring(job_id)
-end
-
 local battery_cmd = [[
 if [ "$(uname)" = "Darwin" ]; then
   pmset -g batt 2>/dev/null | awk '
@@ -63,7 +56,7 @@ fi
 
 function tpane.widgets.battery(opts)
   opts = opts or {}
-  return tpane.job(opts.name or next_job_name("battery"), {
+  return tpane.job({
     every = opts.every or "30s",
     timeout = opts.timeout or "3s",
     cmd = opts.cmd or battery_cmd,
@@ -99,7 +92,7 @@ fi
 
 function tpane.widgets.player(opts)
   opts = opts or {}
-  return tpane.job(opts.name or next_job_name("player"), {
+  return tpane.job({
     every = opts.every or "5s",
     timeout = opts.timeout or "3s",
     cmd = opts.cmd or player_cmd,

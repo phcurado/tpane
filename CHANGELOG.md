@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 - 2026-06-25
+
+### Bug Fixes
+
+- make job handles private by removing public job names from `tpane.job`
+- reject duplicate named commands
+
 ## 0.4.0 - 2026-06-25
 
 ### Features

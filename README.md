@@ -2,7 +2,7 @@
 
 tpane lets you improve your `tmux.conf` by moving most of your configuration to Lua. It ships with widgets and a plugin system: use widgets to improve your navbar, and plugins to improve your workflow.
 
-## What it looks like
+## Quick example
 
 ```lua
 -- ~/.config/tmux/tpane/init.lua
@@ -138,8 +138,6 @@ tpane.statusline {
 
 Built-in widgets:
 
-Plain widgets are handles. Put them directly in `statusline`. Widgets with `(opts)` create a job, so call them once and put the returned handle in `statusline`.
-
 | Widget                        | Description                                                 |
 | ----------------------------- | ----------------------------------------------------------- |
 | `tpane.widgets.session`       | Current tmux session.                                       |
@@ -170,7 +168,7 @@ end)
 For widgets that run shell commands, use `job`. Jobs run in the background and return a handle that widgets can render:
 
 ```lua
-local uptime = tpane.job("uptime", { every = "1m", timeout = "5s", cmd = "uptime" })
+local uptime = tpane.job({ every = "1m", timeout = "5s", cmd = "uptime" })
 
 tpane.statusline {
   right = { uptime },

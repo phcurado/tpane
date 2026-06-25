@@ -410,25 +410,38 @@ impl LuaRuntime {
         tpane.set("state", state).map_err(lua_err)?;
 
         let commands = Rc::clone(&self.commands);
+        let generated_command = Rc::new(Cell::new(0usize));
         let command = self
             .lua
             .create_function(move |lua, args: mlua::MultiValue| {
                 let values = args.into_iter().collect::<Vec<_>>();
                 let (name, handler) = match values.as_slice() {
-                    [Value::Table(table)] => (table.get::<String>("name")?, table.get::<Function>("handler")?),
+                    [Value::Function(handler)] => {
+                        let idx = generated_command.get() + 1;
+                        generated_command.set(idx);
+                        (format!("__tpane_command_{idx}"), handler.clone())
+                    }
+                    [Value::Table(table)] => {
+                        (table.get::<String>("name")?, table.get::<Function>("handler")?)
+                    }
                     [Value::String(name), Value::Function(handler)] => {
                         (name.to_string_lossy(), handler.clone())
                     }
                     _ => {
                         return Err(mlua::Error::RuntimeError(
-                            "expected tpane.command{name=..., handler=...} or tpane.command(name, fn)"
+                            "expected tpane.command(fn), tpane.command(name, fn), or tpane.command{name=..., handler=...}"
                                 .to_string(),
                         ));
                     }
                 };
+                if commands.borrow().contains_key(&name) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "command already registered: {name}"
+                    )));
+                }
                 let handler = lua.create_registry_value(handler)?;
-                commands.borrow_mut().insert(name, handler);
-                Ok(())
+                commands.borrow_mut().insert(name.clone(), handler);
+                run_action_table(lua, &[name])
             })
             .map_err(lua_err)?;
         tpane.set("command", command).map_err(lua_err)?;
@@ -562,9 +575,13 @@ impl LuaRuntime {
 
         let jobs = Rc::clone(&self.jobs);
         let job_data = Rc::clone(&self.job_data);
+        let generated_job = Rc::new(Cell::new(0usize));
         let job = self
             .lua
-            .create_function(move |lua, (name, table): (String, Table)| {
+            .create_function(move |lua, table: Table| {
+                let idx = generated_job.get() + 1;
+                generated_job.set(idx);
+                let name = format!("__tpane_job_{idx}");
                 jobs.borrow_mut().push(parse_job_def(name.clone(), table)?);
                 lua.create_userdata(LuaJob {
                     name,
@@ -1307,6 +1324,17 @@ fn parse_bind_command_value(
             "expected bind action, got {other:?}"
         ))),
     }
+}
+
+fn run_action_table(lua: &Lua, parts: &[String]) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("__tpane_action", "run")?;
+    let command = lua.create_table()?;
+    for (idx, part) in parts.iter().enumerate() {
+        command.set(idx + 1, part.as_str())?;
+    }
+    table.set("command", command)?;
+    Ok(table)
 }
 
 fn parse_action_table(table: Table) -> mlua::Result<ParsedBindCommand> {
@@ -2336,7 +2364,7 @@ mod tests {
         let panes = Rc::new(RefCell::new(Vec::new()));
         let data = Rc::new(RefCell::new(HashMap::new()));
         data.borrow_mut()
-            .insert("uptime".to_string(), "up 1 hour".to_string());
+            .insert("__tpane_job_1".to_string(), "up 1 hour".to_string());
         let runtime = LuaRuntime::with_store_and_data(
             Rc::clone(&panes),
             Rc::new(RefCell::new(Store::memory())),
@@ -2347,7 +2375,7 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                local uptime = tpane.job("uptime", { every = "1m", timeout = "5s", cmd = "uptime" })
+                local uptime = tpane.job({ every = "1m", timeout = "5s", cmd = "uptime" })
                 tpane.statusline { left = { uptime } }
                 value = uptime:get()
                 "#,
@@ -2357,7 +2385,7 @@ mod tests {
         assert_eq!(
             runtime.jobs(),
             vec![JobDef {
-                name: "uptime".to_string(),
+                name: "__tpane_job_1".to_string(),
                 every: Duration::from_secs(60),
                 timeout: Duration::from_secs(5),
                 command: "uptime".to_string(),
@@ -3084,6 +3112,23 @@ mod tests {
         assert_eq!(status.right.as_deref(), Some(""));
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("unknown status style: nope"));
+    }
+
+    #[test]
+    fn duplicate_named_commands_are_rejected() {
+        let (runtime, _) = runtime();
+        let error = runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.command("deploy", function() end)
+                tpane.command("deploy", function() end)
+                "#,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("command already registered: deploy"));
     }
 
     #[test]
