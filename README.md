@@ -23,14 +23,14 @@ tpane.bind("%", tpane.pane.split("right", { cwd = "pane" }))
 tpane.bind('"', tpane.pane.split("down", { cwd = "pane" }))
 
 -- navbar
-tpane.widget("project", function(ctx)
+local project = tpane.widget(function(ctx)
   return ctx.pane and ctx.pane.cwd_basename or ""
 end)
 
 tpane.statusline {
   position = "top",
-  left = { "session" },
-  right = { "project", "clock" },
+  left = { tpane.widgets.session },
+  right = { project, tpane.widgets.clock },
 }
 ```
 
@@ -126,26 +126,45 @@ tpane.bind("R", "source-file ~/.config/tmux/tmux.conf ; display 'reloaded'")
 
 ## Status bar and tabs
 
-`tpane` lets you compose the statusline with widgets. It's very simple to add widgets to your statusline, and you can extend it or even create plugins for it (more on that in the next section).
+`tpane` lets you compose the statusline with widgets. It ships with common widgets, and you can add your own when you need something custom.
 
 ```lua
-tpane.widget("session", function(ctx)
-  return "[" .. ctx.session .. "]"
-end)
-
-tpane.widget("clock", function()
-  return os.date("%H:%M")
-end)
-
-tpane.widget("host", function()
-  return os.getenv("HOSTNAME") or ""
-end)
-
 tpane.statusline {
   position = "top",
-  left = { "session" },
-  right = { "host", "clock" },
+  left = { tpane.widgets.session },
+  right = { tpane.widgets.host, tpane.widgets.clock },
 }
+```
+
+Built-in widgets:
+
+Plain widgets are handles. Put them directly in `statusline`. Widgets with `(opts)` create a job, so call them once and put the returned handle in `statusline`.
+
+| Widget                        | Description                                                 |
+| ----------------------------- | ----------------------------------------------------------- |
+| `tpane.widgets.session`       | Current tmux session.                                       |
+| `tpane.widgets.host`          | Hostname from tmux.                                         |
+| `tpane.widgets.clock`         | Current time, like `14:30`.                                 |
+| `tpane.widgets.date`          | Current date, like `Jun 25`.                                |
+| `tpane.widgets.prefix`        | Shows when tmux prefix is active.                           |
+| `tpane.widgets.battery(opts)` | Battery status with icons. Works on Linux and macOS.        |
+| `tpane.widgets.player(opts)`  | Current playing track. Uses `playerctl`, Music, or Spotify. |
+
+```lua
+local battery = tpane.widgets.battery({ every = "30s" })
+local player = tpane.widgets.player({ every = "5s" })
+
+tpane.statusline {
+  right = { player, battery, tpane.widgets.clock },
+}
+```
+
+Custom widgets are just Lua functions:
+
+```lua
+local cwd = tpane.widget(function(ctx)
+  return ctx.pane and ctx.pane.cwd_basename or ""
+end)
 ```
 
 For widgets that run shell commands, use `job`. Jobs run in the background and return a handle that widgets can render:
@@ -153,9 +172,9 @@ For widgets that run shell commands, use `job`. Jobs run in the background and r
 ```lua
 local uptime = tpane.job("uptime", { every = "1m", timeout = "5s", cmd = "uptime" })
 
-tpane.widget("uptime", function()
-  return uptime
-end)
+tpane.statusline {
+  right = { uptime },
+}
 ```
 
 Style tmux window tabs without writing the full tmux format by hand:

@@ -178,11 +178,11 @@ A widget is a Lua function that returns text, a styled table, a list of parts, o
 `nil` to hide itself.
 
 ```lua
-tpane.widget("host", function()
+local host = tpane.widget(function()
   return os.getenv("HOSTNAME") or ""
 end)
 
-tpane.widget("mode", function(ctx)
+local mode = tpane.widget(function(ctx)
   if ctx.pane and ctx.pane.zoomed then
     return { text = "zoom", fg = "yellow", bold = true }
   end
@@ -198,18 +198,34 @@ ctx.pane     -- current pane object, or nil
 ctx.panes    -- all pane objects
 ```
 
-Built-in widgets:
+Built-in widgets live under `tpane.widgets`.
 
-```text
-session
-clock
-companions
+Plain widgets are handles:
+
+```lua
+tpane.widgets.session
+tpane.widgets.host
+tpane.widgets.clock
+tpane.widgets.date
+tpane.widgets.prefix
+```
+
+Job-backed widgets are factories. Call them once, then put the returned handle in
+your statusline:
+
+```lua
+local battery = tpane.widgets.battery({ every = "30s" })
+local player = tpane.widgets.player({ every = "5s" })
+
+tpane.statusline {
+  right = { player, battery, tpane.widgets.clock },
+}
 ```
 
 Raw tmux format strings also work:
 
 ```lua
-tpane.widget("prefix", function()
+local prefix = tpane.widget(function()
   return tpane.fmt.prefix("PREFIX", "")
 end)
 ```
@@ -220,8 +236,8 @@ end)
 tpane.statusline {
   position = "top",
   interval = 1,
-  left = { "session" },
-  right = { "host", "clock" },
+  left = { tpane.widgets.session },
+  right = { host, mode, tpane.widgets.clock },
   separator = "  ",
 }
 ```
@@ -239,9 +255,9 @@ local uptime = tpane.job("uptime", {
   cmd = "uptime",
 })
 
-tpane.widget("uptime", function()
-  return uptime
-end)
+tpane.statusline {
+  right = { uptime },
+}
 ```
 
 `every` and `timeout` can be seconds or a string ending in `s`, `m`, or `h`.
@@ -619,6 +635,7 @@ tpane.window.*
 tpane.copy.*
 tpane.key.*
 tpane.widget
+tpane.widgets
 tpane.job
 tpane.statusline
 tpane.tabline

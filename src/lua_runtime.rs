@@ -81,9 +81,15 @@ pub struct StatePresentation {
 struct StatusLineDef {
     position: Option<String>,
     interval: Option<u64>,
-    left: Option<Vec<String>>,
-    right: Option<Vec<String>>,
+    left: Option<Vec<StatusItem>>,
+    right: Option<Vec<StatusItem>>,
     separator: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StatusItem {
+    Widget(String),
+    Job(String),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -115,6 +121,11 @@ pub struct JobDef {
 struct LuaJob {
     name: String,
     data: Rc<RefCell<HashMap<String, String>>>,
+}
+
+#[derive(Clone)]
+struct LuaWidget {
+    name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -488,14 +499,20 @@ impl LuaRuntime {
             .map_err(lua_err)?;
         tpane.set("panel", panel).map_err(lua_err)?;
 
+        let widget_handles = self.lua.create_table().map_err(lua_err)?;
+        tpane.set("widgets", widget_handles).map_err(lua_err)?;
         let widgets = Rc::clone(&self.widgets);
+        let widget_counter = Rc::new(Cell::new(0));
         let widget = self
             .lua
-            .create_function(move |lua, (name, handler): (String, Function)| {
+            .create_function(move |lua, handler: Function| {
+                let id = widget_counter.get() + 1;
+                widget_counter.set(id);
+                let name = format!("__tpane_widget_{id}");
                 widgets
                     .borrow_mut()
-                    .insert(name, lua.create_registry_value(handler)?);
-                Ok(())
+                    .insert(name.clone(), lua.create_registry_value(handler)?);
+                lua.create_userdata(LuaWidget { name })
             })
             .map_err(lua_err)?;
         tpane.set("widget", widget).map_err(lua_err)?;
@@ -610,6 +627,7 @@ impl LuaRuntime {
 
     fn load_prelude(&self) -> Result<()> {
         self.load_source("prelude.lua", PRELUDE)
+            .and_then(|_| self.load_source("widgets.lua", WIDGETS))
             .map_err(|error| anyhow!("failed to load Lua prelude: {error}"))
     }
 
@@ -741,17 +759,29 @@ impl LuaRuntime {
 
     fn render_status_slot(
         &self,
-        names: &[String],
+        items: &[StatusItem],
         separator: &str,
         ctx: Option<Table>,
         errors: &mut Vec<String>,
     ) -> String {
-        names
+        items
             .iter()
-            .filter_map(|name| self.render_widget(name, ctx.clone(), errors))
+            .filter_map(|item| self.render_status_item(item, ctx.clone(), errors))
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join(separator)
+    }
+
+    fn render_status_item(
+        &self,
+        item: &StatusItem,
+        ctx: Option<Table>,
+        errors: &mut Vec<String>,
+    ) -> Option<String> {
+        match item {
+            StatusItem::Widget(name) => self.render_widget(name, ctx, errors),
+            StatusItem::Job(name) => self.job_data.borrow().get(name).cloned(),
+        }
     }
 
     fn status_context(&self, current_pane_id: Option<&str>) -> mlua::Result<Table> {
@@ -940,15 +970,32 @@ fn parse_statusline_def(table: Table) -> mlua::Result<StatusLineDef> {
     })
 }
 
-fn parse_status_slot(value: Value) -> mlua::Result<Option<Vec<String>>> {
+fn parse_status_slot(value: Value) -> mlua::Result<Option<Vec<StatusItem>>> {
     match value {
         Value::Nil => Ok(None),
-        Value::Table(table) => table
-            .sequence_values::<String>()
-            .collect::<mlua::Result<Vec<_>>>()
-            .map(Some),
+        Value::Table(table) => {
+            let mut items = Vec::new();
+            for value in table.sequence_values::<Value>() {
+                items.push(parse_status_item(value?)?);
+            }
+            Ok(Some(items))
+        }
         other => Err(mlua::Error::RuntimeError(format!(
-            "statusline slot must be a list of widget names, got {other:?}"
+            "statusline slot must be a list of widgets or jobs, got {other:?}"
+        ))),
+    }
+}
+
+fn parse_status_item(value: Value) -> mlua::Result<StatusItem> {
+    match value {
+        Value::UserData(value) if value.is::<LuaWidget>() => Ok(StatusItem::Widget(
+            value.borrow::<LuaWidget>()?.name.clone(),
+        )),
+        Value::UserData(value) if value.is::<LuaJob>() => {
+            Ok(StatusItem::Job(value.borrow::<LuaJob>()?.name.clone()))
+        }
+        other => Err(mlua::Error::RuntimeError(format!(
+            "statusline item must be a widget or job; got {other:?}"
         ))),
     }
 }
@@ -2087,6 +2134,12 @@ impl UserData for LuaJob {
     }
 }
 
+impl UserData for LuaWidget {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("name", |_, this| Ok(this.name.clone()));
+    }
+}
+
 impl UserData for LuaPane {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("id", |_, this| Ok(this.id.clone()));
@@ -2187,6 +2240,7 @@ fn basename(path: &str) -> String {
 }
 
 const PRELUDE: &str = include_str!("lua/prelude.lua");
+const WIDGETS: &str = include_str!("lua/widgets.lua");
 
 const BUILTIN_PLUGIN_VIM_NAVIGATOR: &str = include_str!("../plugins/vim-navigator/init.lua");
 const BUILTIN_PLUGIN_YANK: &str = include_str!("../plugins/yank/init.lua");
@@ -2294,8 +2348,7 @@ mod tests {
                 "test.lua",
                 r#"
                 local uptime = tpane.job("uptime", { every = "1m", timeout = "5s", cmd = "uptime" })
-                tpane.widget("uptime", function() return uptime end)
-                tpane.statusline { left = { "uptime" } }
+                tpane.statusline { left = { uptime } }
                 value = uptime:get()
                 "#,
             )
@@ -2866,32 +2919,6 @@ mod tests {
     }
 
     #[test]
-    fn companions_widget_uses_state_registry() {
-        let (runtime, panes) = runtime();
-        let mut companion = pane("%1");
-        companion.home = Some("@1".to_string());
-        companion.label = "logs".to_string();
-        companion.state = Some("approval".to_string());
-        panes.borrow_mut().push(companion);
-        runtime
-            .load_source(
-                "test.lua",
-                r#"
-                tpane.state("approval", { color = "magenta", glyph = "?" })
-                tpane.statusline { right = { "companions" } }
-                "#,
-            )
-            .unwrap();
-
-        let (status, errors) = runtime.render_statusline(Some("%1"));
-        assert!(errors.is_empty());
-        assert_eq!(
-            status.right.as_deref(),
-            Some("#[fg=magenta]?#[default] logs")
-        );
-    }
-
-    #[test]
     fn statusline_context_uses_current_pane_id() {
         let (runtime, panes) = runtime();
         let mut other = pane("%1");
@@ -2908,8 +2935,8 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.widget("s", function(ctx) return "[" .. ctx.session .. "]" end)
-                tpane.statusline { left = { "s" } }
+                local s = tpane.widget(function(ctx) return "[" .. ctx.session .. "]" end)
+                tpane.statusline { left = { s } }
                 "#,
             )
             .unwrap();
@@ -2924,12 +2951,78 @@ mod tests {
         let (runtime, panes) = runtime();
         panes.borrow_mut().push(pane("%1"));
         runtime
-            .load_source("test.lua", "tpane.statusline { left = { 'session' } }")
+            .load_source(
+                "test.lua",
+                "tpane.statusline { left = { tpane.widgets.session } }",
+            )
             .unwrap();
 
         let (status, errors) = runtime.render_statusline(Some("%1"));
         assert!(errors.is_empty());
         assert_eq!(status.left.as_deref(), Some("[#{client_session}] "));
+    }
+
+    #[test]
+    fn builtin_widget_pack_renders_common_status_parts() {
+        let (runtime, panes) = runtime();
+        panes.borrow_mut().push(pane("%1"));
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.statusline {
+                  left = { tpane.widgets.host, tpane.widgets.prefix }
+                }
+                "#,
+            )
+            .unwrap();
+
+        let (status, errors) = runtime.render_statusline(Some("%1"));
+        assert!(errors.is_empty());
+        assert_eq!(
+            status.left.as_deref(),
+            Some("#H  #{?client_prefix,  ,  }")
+        );
+    }
+
+    #[test]
+    fn unknown_builtin_widget_errors_with_name() {
+        let (runtime, _) = runtime();
+        let error = runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.statusline { right = { tpane.widgets.typo } }
+                "#,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("unknown widget: tpane.widgets.typo"));
+    }
+
+    #[test]
+    fn builtin_job_widgets_register_jobs() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                local battery = tpane.widgets.battery({ every = "20s", timeout = "1s", cmd = "printf battery" })
+                local player = tpane.widgets.player({ every = "5s", timeout = "1s", cmd = "printf song" })
+                tpane.statusline { right = { battery, player } }
+                "#,
+            )
+            .unwrap();
+
+        let jobs = runtime.jobs();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].every, Duration::from_secs(20));
+        assert_eq!(jobs[0].timeout, Duration::from_secs(1));
+        assert_eq!(jobs[0].command, "printf battery");
+        assert_eq!(jobs[1].every, Duration::from_secs(5));
+        assert_eq!(jobs[1].timeout, Duration::from_secs(1));
+        assert_eq!(jobs[1].command, "printf song");
     }
 
     #[test]
@@ -2939,9 +3032,9 @@ mod tests {
             .load_source(
                 "test.lua",
                 r##"
-                tpane.widget("raw", function() return "#{session_name}" end)
-                tpane.widget("styled", function() return { text = "x", fg = "red", bold = true } end)
-                tpane.statusline { position = "top", interval = 1, left = { "raw" }, right = { "styled" }, separator = " | " }
+                local raw = tpane.widget(function() return "#{session_name}" end)
+                local styled = tpane.widget(function() return { text = "x", fg = "red", bold = true } end)
+                tpane.statusline { position = "top", interval = 1, left = { raw }, right = { styled }, separator = " | " }
                 "##,
             )
             .unwrap();
@@ -2961,18 +3054,17 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.widget("bad", function() error("boom") end)
-                tpane.widget("ok", function() return "ok" end)
-                tpane.statusline { right = { "bad", "missing", "ok" } }
+                local bad = tpane.widget(function() error("boom") end)
+                local ok = tpane.widget(function() return "ok" end)
+                tpane.statusline { right = { bad, ok } }
                 "#,
             )
             .unwrap();
 
         let (status, errors) = runtime.render_statusline(None);
         assert_eq!(status.right.as_deref(), Some("ok"));
-        assert_eq!(errors.len(), 2);
+        assert_eq!(errors.len(), 1);
         assert!(errors.iter().any(|error| error.contains("boom")));
-        assert!(errors.iter().any(|error| error.contains("unknown widget")));
     }
 
     #[test]
@@ -2982,8 +3074,8 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.widget("bad", function() return { text = "x", nope = true } end)
-                tpane.statusline { right = { "bad" } }
+                local bad = tpane.widget(function() return { text = "x", nope = true } end)
+                tpane.statusline { right = { bad } }
                 "#,
             )
             .unwrap();

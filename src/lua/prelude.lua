@@ -144,14 +144,6 @@ tpane.state("working", { color = "yellow", glyph = "" })
 tpane.state("done_unseen", { color = "blue", glyph = "" })
 tpane.state("idle_seen", { color = "green", glyph = "" })
 
-tpane.widget("session", function()
-  return "[#{client_session}] "
-end)
-
-tpane.widget("clock", function()
-  return os.date("%H:%M")
-end)
-
 local function state_presentation(state)
   if not state then return {} end
   return tpane.state(state) or {}
@@ -162,32 +154,6 @@ local function state_segment(state, fallback_glyph)
   if not presentation.color then return nil end
   return { text = presentation.glyph or fallback_glyph or "●", fg = presentation.color }
 end
-
-local function hidden_pane(pane)
-  return pane.session and pane.session:match("^__tpane%-hidden%-") ~= nil
-end
-
-local function compact_pane_segment(pane)
-  local presentation = state_presentation(pane.state)
-  if hidden_pane(pane) then
-    return { text = "○", fg = presentation.color or "default" }
-  end
-  return state_segment(pane.state, "●") or { text = "○", fg = "default" }
-end
-
-tpane.widget("companions", function(ctx)
-  local parts = {}
-  for _, pane in ipairs(ctx.panes or {}) do
-    if pane.home then
-      parts[#parts + 1] = compact_pane_segment(pane)
-      parts[#parts + 1] = { text = " " .. pane.label }
-      parts[#parts + 1] = "  "
-    end
-  end
-  if #parts == 0 then return nil end
-  parts[#parts] = nil
-  return parts
-end)
 
 tpane.pane_border(function(pane)
   local parts = {}
