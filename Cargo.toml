@@ -2,12 +2,17 @@
 name = "tpane"
 version = "0.4.0"
 edition = "2024"
+rust-version = "1.85"
+authors = ["Paulo Curado"]
 license = "MIT"
 description = "Configure tmux with Lua."
+readme = "README.md"
 repository = "https://github.com/phcurado/tpane"
 homepage = "https://github.com/phcurado/tpane"
+documentation = "https://github.com/phcurado/tpane/blob/main/docs/lua-api.md"
 keywords = ["tmux", "lua", "terminal", "multiplexer"]
 categories = ["command-line-utilities"]
+exclude = [".github/**"]
 
 [dependencies]
 anyhow = "1.0"
