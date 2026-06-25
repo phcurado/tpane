@@ -226,6 +226,32 @@ tpane.statusline {
 }
 ```
 
+### Jobs
+
+Use jobs for widget data that comes from shell commands. Jobs run in the
+background on their own interval and return a handle that widgets can render.
+Status rendering does not block on the command.
+
+```lua
+local uptime = tpane.job("uptime", {
+  every = "1m",
+  timeout = "5s",
+  cmd = "uptime",
+})
+
+tpane.widget("uptime", function()
+  return uptime
+end)
+```
+
+`every` and `timeout` can be seconds or a string ending in `s`, `m`, or `h`.
+`timeout` defaults to `10s`.
+
+```lua
+tpane.job("battery", { every = 30, timeout = "5s", cmd = "acpi -b" })
+tpane.job("music", { every = "5s", timeout = "2s", cmd = "playerctl metadata title" })
+```
+
 ### Styled parts
 
 ```lua
@@ -593,6 +619,7 @@ tpane.window.*
 tpane.copy.*
 tpane.key.*
 tpane.widget
+tpane.job
 tpane.statusline
 tpane.tabline
 tpane.command

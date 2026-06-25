@@ -4,6 +4,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use mlua::{
@@ -31,6 +32,8 @@ pub struct LuaRuntime {
     statusline: Rc<RefCell<Option<StatusLineDef>>>,
     options: Rc<RefCell<Vec<(String, String)>>>,
     option_appends: Rc<RefCell<Vec<(String, String)>>>,
+    jobs: Rc<RefCell<Vec<JobDef>>>,
+    job_data: Rc<RefCell<HashMap<String, String>>>,
     used_plugins: Rc<RefCell<HashMap<String, PluginSpec>>>,
     load_plugins: bool,
     panes: Rc<RefCell<Vec<PaneSnapshot>>>,
@@ -100,6 +103,20 @@ pub struct Detection {
     pub tag: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobDef {
+    pub name: String,
+    pub every: Duration,
+    pub timeout: Duration,
+    pub command: String,
+}
+
+#[derive(Clone)]
+struct LuaJob {
+    name: String,
+    data: Rc<RefCell<HashMap<String, String>>>,
+}
+
 #[derive(Debug, Clone)]
 struct LuaPane {
     id: String,
@@ -135,12 +152,34 @@ impl LuaRuntime {
         panes: Rc<RefCell<Vec<PaneSnapshot>>>,
         store: Rc<RefCell<Store>>,
     ) -> Result<Self> {
-        Self::with_store_and_plugin_loading(panes, store, true)
+        Self::with_store_and_data(panes, store, Rc::new(RefCell::new(HashMap::new())))
+    }
+
+    pub fn with_store_and_data(
+        panes: Rc<RefCell<Vec<PaneSnapshot>>>,
+        store: Rc<RefCell<Store>>,
+        job_data: Rc<RefCell<HashMap<String, String>>>,
+    ) -> Result<Self> {
+        Self::with_store_data_and_plugin_loading(panes, store, job_data, true)
     }
 
     fn with_store_and_plugin_loading(
         panes: Rc<RefCell<Vec<PaneSnapshot>>>,
         store: Rc<RefCell<Store>>,
+        load_plugins: bool,
+    ) -> Result<Self> {
+        Self::with_store_data_and_plugin_loading(
+            panes,
+            store,
+            Rc::new(RefCell::new(HashMap::new())),
+            load_plugins,
+        )
+    }
+
+    fn with_store_data_and_plugin_loading(
+        panes: Rc<RefCell<Vec<PaneSnapshot>>>,
+        store: Rc<RefCell<Store>>,
+        job_data: Rc<RefCell<HashMap<String, String>>>,
         load_plugins: bool,
     ) -> Result<Self> {
         let lua = Lua::new();
@@ -156,6 +195,7 @@ impl LuaRuntime {
         let statusline = Rc::new(RefCell::new(None));
         let options = Rc::new(RefCell::new(Vec::new()));
         let option_appends = Rc::new(RefCell::new(Vec::new()));
+        let jobs = Rc::new(RefCell::new(Vec::new()));
         let used_plugins = Rc::new(RefCell::new(HashMap::new()));
         let runtime = Self {
             lua,
@@ -171,6 +211,8 @@ impl LuaRuntime {
             statusline,
             options,
             option_appends,
+            jobs,
+            job_data,
             used_plugins,
             load_plugins,
             panes,
@@ -501,6 +543,20 @@ impl LuaRuntime {
             .map_err(lua_err)?;
         tpane.set("append", append).map_err(lua_err)?;
 
+        let jobs = Rc::clone(&self.jobs);
+        let job_data = Rc::clone(&self.job_data);
+        let job = self
+            .lua
+            .create_function(move |lua, (name, table): (String, Table)| {
+                jobs.borrow_mut().push(parse_job_def(name.clone(), table)?);
+                lua.create_userdata(LuaJob {
+                    name,
+                    data: Rc::clone(&job_data),
+                })
+            })
+            .map_err(lua_err)?;
+        tpane.set("job", job).map_err(lua_err)?;
+
         let opt_options = Rc::clone(&self.options);
         let opt = self.lua.create_table().map_err(lua_err)?;
         let opt_meta = self.lua.create_table().map_err(lua_err)?;
@@ -628,6 +684,10 @@ impl LuaRuntime {
         let mut appends = self.option_appends.borrow().clone();
         appends.sort_by(|a, b| a.0.cmp(&b.0));
         appends
+    }
+
+    pub fn jobs(&self) -> Vec<JobDef> {
+        self.jobs.borrow().clone()
     }
 
     pub fn state_presentation(&self, state: &str) -> Option<StatePresentation> {
@@ -893,6 +953,54 @@ fn parse_status_slot(value: Value) -> mlua::Result<Option<Vec<String>>> {
     }
 }
 
+fn parse_job_def(name: String, table: Table) -> mlua::Result<JobDef> {
+    let command = table
+        .get::<Option<String>>("cmd")?
+        .or(table.get::<Option<String>>("command")?)
+        .ok_or_else(|| mlua::Error::RuntimeError("job requires cmd or command".to_string()))?;
+    let every = parse_duration_value("every", table.get("every")?)?;
+    let timeout = match table.get::<Option<Value>>("timeout")? {
+        Some(value) => parse_duration_value("timeout", value)?,
+        None => Duration::from_secs(10),
+    };
+    Ok(JobDef {
+        name,
+        every,
+        timeout,
+        command,
+    })
+}
+
+fn parse_duration_value(name: &str, value: Value) -> mlua::Result<Duration> {
+    match value {
+        Value::Integer(seconds) if seconds >= 0 => Ok(Duration::from_secs(seconds as u64)),
+        Value::Number(seconds) if seconds >= 0.0 => Ok(Duration::from_secs_f64(seconds)),
+        Value::String(value) => parse_duration_string(name, &value.to_string_lossy()),
+        other => Err(mlua::Error::RuntimeError(format!(
+            "job {name} must be seconds or a string like 10s, 5m, or 1h; got {other:?}"
+        ))),
+    }
+}
+
+fn parse_duration_string(name: &str, value: &str) -> mlua::Result<Duration> {
+    let value = value.trim();
+    let (number, multiplier) = match value.chars().last() {
+        Some('s') => (&value[..value.len() - 1], 1),
+        Some('m') => (&value[..value.len() - 1], 60),
+        Some('h') => (&value[..value.len() - 1], 60 * 60),
+        Some(_) => (value, 1),
+        None => {
+            return Err(mlua::Error::RuntimeError(format!(
+                "job {name} cannot be empty"
+            )));
+        }
+    };
+    let amount = number
+        .parse::<u64>()
+        .map_err(|_| mlua::Error::RuntimeError(format!("invalid job {name}: {value}")))?;
+    Ok(Duration::from_secs(amount * multiplier))
+}
+
 fn value_to_option_table(lua: &Lua, key: &str, value: Value) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set(key, value)?;
@@ -955,8 +1063,9 @@ fn render_widget_value(value: Value) -> mlua::Result<Option<String>> {
         Value::Nil => Ok(None),
         Value::String(value) => Ok(Some(value.to_string_lossy())),
         Value::Table(table) => render_widget_table(table),
+        Value::UserData(value) if value.is::<LuaJob>() => Ok(value.borrow::<LuaJob>()?.value()),
         other => Err(mlua::Error::RuntimeError(format!(
-            "expected string, table, or nil; got {other:?}"
+            "expected string, table, job, or nil; got {other:?}"
         ))),
     }
 }
@@ -1961,6 +2070,23 @@ fn mlua_external(error: anyhow::Error) -> mlua::Error {
     mlua::Error::RuntimeError(error.to_string())
 }
 
+impl LuaJob {
+    fn value(&self) -> Option<String> {
+        self.data.borrow().get(&self.name).cloned()
+    }
+}
+
+impl UserData for LuaJob {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("name", |_, this| Ok(this.name.clone()));
+        fields.add_field_method_get("value", |_, this| Ok(this.value()));
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("get", |_, this, ()| Ok(this.value()));
+    }
+}
+
 impl UserData for LuaPane {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("id", |_, this| Ok(this.id.clone()));
@@ -2149,6 +2275,49 @@ mod tests {
             split_direction("left").unwrap(),
             (tmux::SplitDirection::Horizontal, true)
         ));
+    }
+
+    #[test]
+    fn job_registers_command_and_data_reads_cache() {
+        let panes = Rc::new(RefCell::new(Vec::new()));
+        let data = Rc::new(RefCell::new(HashMap::new()));
+        data.borrow_mut()
+            .insert("uptime".to_string(), "up 1 hour".to_string());
+        let runtime = LuaRuntime::with_store_and_data(
+            Rc::clone(&panes),
+            Rc::new(RefCell::new(Store::memory())),
+            data,
+        )
+        .unwrap();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                local uptime = tpane.job("uptime", { every = "1m", timeout = "5s", cmd = "uptime" })
+                tpane.widget("uptime", function() return uptime end)
+                tpane.statusline { left = { "uptime" } }
+                value = uptime:get()
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime.jobs(),
+            vec![JobDef {
+                name: "uptime".to_string(),
+                every: Duration::from_secs(60),
+                timeout: Duration::from_secs(5),
+                command: "uptime".to_string(),
+            }]
+        );
+        assert_eq!(
+            runtime.lua.globals().get::<String>("value").unwrap(),
+            "up 1 hour"
+        );
+        assert_eq!(
+            runtime.render_statusline(None).0.left.as_deref(),
+            Some("up 1 hour")
+        );
     }
 
     #[test]

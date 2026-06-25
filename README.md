@@ -148,6 +148,16 @@ tpane.statusline {
 }
 ```
 
+For widgets that run shell commands, use `job`. Jobs run in the background and return a handle that widgets can render:
+
+```lua
+local uptime = tpane.job("uptime", { every = "1m", timeout = "5s", cmd = "uptime" })
+
+tpane.widget("uptime", function()
+  return uptime
+end)
+```
+
 Style tmux window tabs without writing the full tmux format by hand:
 
 ```lua

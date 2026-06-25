@@ -3,6 +3,11 @@ name = "tpane"
 version = "0.3.2"
 edition = "2024"
 license = "MIT"
+description = "Configure tmux with Lua."
+repository = "https://github.com/phcurado/tpane"
+homepage = "https://github.com/phcurado/tpane"
+keywords = ["tmux", "lua", "terminal", "multiplexer"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0"

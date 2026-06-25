@@ -6,13 +6,17 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 
-use crate::lua_runtime::{LuaRuntime, StatePresentation, config_lua_files, user_plugin_files};
+use crate::lua_runtime::{
+    JobDef, LuaRuntime, StatePresentation, config_lua_files, user_plugin_files,
+};
 use crate::process::{ProcessProvider, SystemProcessProvider};
 use crate::protocol::{PaneSnapshot, Request, Response};
 use crate::store::Store;
@@ -26,6 +30,11 @@ const SERVER_SENTINEL: &str = "@tpane_applied";
 struct StateRecord {
     raw: String,
     value: String,
+}
+
+struct JobResult {
+    name: String,
+    result: std::result::Result<String, String>,
 }
 
 pub fn run(socket: PathBuf) -> Result<()> {
@@ -95,6 +104,11 @@ struct Daemon {
     status_position: Option<String>,
     status_interval: Option<u64>,
     options: HashMap<String, String>,
+    job_data: Rc<RefCell<HashMap<String, String>>>,
+    job_last_run: HashMap<String, Instant>,
+    job_running: HashSet<String>,
+    job_tx: mpsc::Sender<JobResult>,
+    job_rx: mpsc::Receiver<JobResult>,
     pane_borders: HashMap<String, String>,
     pane_vars: HashMap<(String, String), String>,
     config_sig: Vec<(PathBuf, SystemTime)>,
@@ -104,8 +118,14 @@ impl Daemon {
     fn new() -> Result<Self> {
         let panes = Rc::new(RefCell::new(Vec::new()));
         let store = Rc::new(RefCell::new(Store::load(store_path())));
+        let job_data = Rc::new(RefCell::new(HashMap::new()));
+        let (job_tx, job_rx) = mpsc::channel();
         let mut daemon = Self {
-            lua: LuaRuntime::with_store(Rc::clone(&panes), Rc::clone(&store))?,
+            lua: LuaRuntime::with_store_and_data(
+                Rc::clone(&panes),
+                Rc::clone(&store),
+                Rc::clone(&job_data),
+            )?,
             process_provider: SystemProcessProvider,
             store,
             panes,
@@ -122,6 +142,11 @@ impl Daemon {
             status_position: None,
             status_interval: None,
             options: HashMap::new(),
+            job_data,
+            job_last_run: HashMap::new(),
+            job_running: HashSet::new(),
+            job_tx,
+            job_rx,
             pane_borders: HashMap::new(),
             pane_vars: HashMap::new(),
             config_sig: config_signature(),
@@ -190,7 +215,11 @@ impl Daemon {
     }
 
     fn reload_plugins(&mut self) -> Result<()> {
-        let rt = match LuaRuntime::with_store(Rc::clone(&self.panes), Rc::clone(&self.store)) {
+        let rt = match LuaRuntime::with_store_and_data(
+            Rc::clone(&self.panes),
+            Rc::clone(&self.store),
+            Rc::clone(&self.job_data),
+        ) {
             Ok(rt) => rt,
             Err(error) => {
                 self.load_errors = vec![format!("prelude.lua: {error}")];
@@ -297,6 +326,7 @@ impl Daemon {
 
     fn scan(&mut self) -> Result<usize> {
         self.ensure_server_cache_current()?;
+        self.update_jobs();
         let panes = tmux::list_panes()?;
         let count = panes.len();
         let mut snapshots = Vec::new();
@@ -365,6 +395,64 @@ impl Daemon {
         self.update_statusline(current_pane_id.as_deref())?;
         self.store.borrow_mut().flush()?;
         Ok(count)
+    }
+
+    fn update_jobs(&mut self) {
+        let jobs = self.lua.jobs();
+        let names = jobs
+            .iter()
+            .map(|source| source.name.clone())
+            .collect::<HashSet<_>>();
+        self.drain_job_results(&names);
+        self.job_data
+            .borrow_mut()
+            .retain(|name, _| names.contains(name));
+        self.job_last_run.retain(|name, _| names.contains(name));
+        self.job_running.retain(|name| names.contains(name));
+
+        let now = Instant::now();
+        for source in jobs {
+            if self.job_running.contains(&source.name) {
+                continue;
+            }
+            let due = self
+                .job_last_run
+                .get(&source.name)
+                .is_none_or(|last| now.duration_since(*last) >= source.every);
+            if due {
+                self.start_job(source, now);
+            }
+        }
+    }
+
+    fn drain_job_results(&mut self, names: &HashSet<String>) {
+        while let Ok(result) = self.job_rx.try_recv() {
+            self.job_running.remove(&result.name);
+            if !names.contains(&result.name) {
+                continue;
+            }
+            match result.result {
+                Ok(value) => {
+                    self.job_data.borrow_mut().insert(result.name, value);
+                }
+                Err(error) => {
+                    self.record_runtime_error(format!("job {}: {error}", result.name));
+                }
+            }
+        }
+    }
+
+    fn start_job(&mut self, job: JobDef, now: Instant) {
+        self.job_last_run.insert(job.name.clone(), now);
+        self.job_running.insert(job.name.clone());
+        let tx = self.job_tx.clone();
+        thread::spawn(move || {
+            let result = run_job_command(&job.command, job.timeout);
+            let _ = tx.send(JobResult {
+                name: job.name,
+                result,
+            });
+        });
     }
 
     fn update_pane_tag(
@@ -963,6 +1051,46 @@ fn handle_stream(mut stream: UnixStream, daemon: &mut Daemon) -> Result<()> {
     Ok(())
 }
 
+fn run_job_command(command: &str, timeout: Duration) -> std::result::Result<String, String> {
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("timed out after {}s", timeout.as_secs()));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| error.to_string())?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .trim_end_matches(['\r', '\n'])
+            .to_string())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if error.is_empty() {
+            Err(output.status.to_string())
+        } else {
+            Err(error)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -994,7 +1122,14 @@ mod tests {
     fn test_daemon(lua_source: &str) -> Daemon {
         let panes = Rc::new(RefCell::new(Vec::new()));
         let store = Rc::new(RefCell::new(Store::memory()));
-        let lua = LuaRuntime::with_store(Rc::clone(&panes), Rc::clone(&store)).unwrap();
+        let job_data = Rc::new(RefCell::new(HashMap::new()));
+        let (job_tx, job_rx) = mpsc::channel();
+        let lua = LuaRuntime::with_store_and_data(
+            Rc::clone(&panes),
+            Rc::clone(&store),
+            Rc::clone(&job_data),
+        )
+        .unwrap();
         lua.load_source("test.lua", lua_source).unwrap();
         Daemon {
             lua,
@@ -1014,6 +1149,11 @@ mod tests {
             status_position: None,
             status_interval: None,
             options: HashMap::new(),
+            job_data,
+            job_last_run: HashMap::new(),
+            job_running: HashSet::new(),
+            job_tx,
+            job_rx,
             pane_borders: HashMap::new(),
             pane_vars: HashMap::new(),
             config_sig: Vec::new(),
@@ -1127,6 +1267,13 @@ mod tests {
         assert!(should_exit_after_liveness_failure(
             MAX_TMUX_LIVENESS_FAILURES
         ));
+    }
+
+    #[test]
+    fn job_command_times_out() {
+        let result = run_job_command("sleep 1", Duration::from_millis(100));
+
+        assert!(result.unwrap_err().contains("timed out"));
     }
 
     #[test]
