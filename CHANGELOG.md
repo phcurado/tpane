@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 - 2026-06-26
+
+### Features
+
+- add built-in `themes` plugin generated from iTerm2 color schemes
+- add `tpane themes` to list bundled themes
+
 ## 0.4.2 - 2026-06-25
 
 ### Bug Fixes

@@ -261,6 +261,7 @@ impl Daemon {
             self.surface_load_errors();
             return Err(error);
         }
+        errors.extend(rt.run_deferred());
 
         for unbind in rt.unbinds() {
             if let Err(error) = tmux::unbind_key(&unbind.mode, &unbind.key) {

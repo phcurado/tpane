@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,6 +23,7 @@ pub struct LuaRuntime {
     kinds: Rc<RefCell<Vec<Kind>>>,
     commands: Rc<RefCell<HashMap<String, RegistryKey>>>,
     events: Rc<RefCell<HashMap<String, Vec<RegistryKey>>>>,
+    deferred: Rc<RefCell<Vec<RegistryKey>>>,
     keybinds: Rc<RefCell<Vec<Keybind>>>,
     unbinds: Rc<RefCell<Vec<Unbind>>>,
     panels: Rc<RefCell<Vec<Panel>>>,
@@ -197,6 +198,7 @@ impl LuaRuntime {
         let kinds = Rc::new(RefCell::new(Vec::new()));
         let commands = Rc::new(RefCell::new(HashMap::new()));
         let events = Rc::new(RefCell::new(HashMap::new()));
+        let deferred = Rc::new(RefCell::new(Vec::new()));
         let keybinds = Rc::new(RefCell::new(Vec::new()));
         let unbinds = Rc::new(RefCell::new(Vec::new()));
         let panels = Rc::new(RefCell::new(Vec::new()));
@@ -213,6 +215,7 @@ impl LuaRuntime {
             kinds,
             commands,
             events,
+            deferred,
             keybinds,
             unbinds,
             panels,
@@ -437,6 +440,18 @@ impl LuaRuntime {
             })
             .map_err(lua_err)?;
         tpane.set("on", on).map_err(lua_err)?;
+
+        let deferred = Rc::clone(&self.deferred);
+        let defer = self
+            .lua
+            .create_function(move |lua, handler: Function| {
+                deferred
+                    .borrow_mut()
+                    .push(lua.create_registry_value(handler)?);
+                Ok(())
+            })
+            .map_err(lua_err)?;
+        tpane.set("_defer", defer).map_err(lua_err)?;
 
         let keybinds = Rc::clone(&self.keybinds);
         let key_commands = Rc::clone(&self.commands);
@@ -691,9 +706,11 @@ impl LuaRuntime {
     }
 
     pub fn options(&self) -> Vec<(String, String)> {
-        let mut options = self.options.borrow().clone();
-        options.sort_by(|a, b| a.0.cmp(&b.0));
-        options
+        let mut options = BTreeMap::new();
+        for (name, value) in self.options.borrow().iter() {
+            options.insert(name.clone(), value.clone());
+        }
+        options.into_iter().collect()
     }
 
     pub fn option_appends(&self) -> Vec<(String, String)> {
@@ -858,6 +875,22 @@ impl LuaRuntime {
         })
     }
 
+    pub fn run_deferred(&self) -> Vec<String> {
+        let deferred = std::mem::take(&mut *self.deferred.borrow_mut());
+        let mut errors = Vec::new();
+        for key in deferred {
+            match self.lua.registry_value::<Function>(&key) {
+                Ok(handler) => {
+                    if let Err(error) = handler.call::<()>(()) {
+                        errors.push(format!("deferred: {error}"));
+                    }
+                }
+                Err(error) => errors.push(format!("deferred: {error}")),
+            }
+        }
+        errors
+    }
+
     pub fn fire_event(&self, event: &str, pane: Option<&PaneSnapshot>) -> Vec<String> {
         let payload = pane
             .map(|pane| snapshot_table(&self.lua, pane).map(Value::Table))
@@ -918,6 +951,15 @@ pub fn config_lua_files() -> Vec<PathBuf> {
     collect_lua_files_recursive(&config, &mut files);
     files.sort();
     files
+}
+
+pub fn builtin_theme_names() -> Vec<String> {
+    BUILTIN_PLUGIN_THEMES_DATA
+        .lines()
+        .filter_map(|line| line.split('\t').next())
+        .filter(|name| !name.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn collect_lua_files(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -1616,6 +1658,13 @@ fn load_plugin(lua: &Lua, name: &str, spec: &PluginSpec) -> mlua::Result<()> {
             .load(BUILTIN_PLUGIN_YANK)
             .set_name("builtin/plugins/yank/init.lua")
             .exec(),
+        "themes" => {
+            let tpane: Table = lua.globals().get("tpane")?;
+            tpane.set("_theme_data", BUILTIN_PLUGIN_THEMES_DATA)?;
+            lua.load(BUILTIN_PLUGIN_THEMES)
+                .set_name("builtin/plugins/themes/init.lua")
+                .exec()
+        }
         _ => Err(mlua::Error::RuntimeError(format!("unknown plugin: {name}"))),
     }
 }
@@ -2254,6 +2303,8 @@ const WIDGETS: &str = include_str!("lua/widgets.lua");
 
 const BUILTIN_PLUGIN_VIM_NAVIGATOR: &str = include_str!("../plugins/vim-navigator/init.lua");
 const BUILTIN_PLUGIN_YANK: &str = include_str!("../plugins/yank/init.lua");
+const BUILTIN_PLUGIN_THEMES: &str = include_str!("../plugins/themes/init.lua");
+const BUILTIN_PLUGIN_THEMES_DATA: &str = include_str!("../plugins/themes/palettes.tsv");
 
 const BUILTIN_KINDS: &str = include_str!("lua/builtin_kinds.lua");
 
@@ -2519,6 +2570,79 @@ mod tests {
         assert_eq!(spec.url.as_deref(), Some("https://example.test/foo.git"));
         assert_eq!(spec.branch.as_deref(), Some("main"));
         assert_eq!(spec.path.as_deref(), Some("plugins/foo"));
+    }
+
+    #[test]
+    fn builtin_themes_plugin_applies_palette() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.use("themes")
+                tpane.theme("catppuccin-mocha")
+                "#,
+            )
+            .unwrap();
+
+        assert!(runtime.options().contains(&(
+            "status-style".to_string(),
+            "fg=#cdd6f4,bg=#1e1e2e".to_string()
+        )));
+        assert_eq!(
+            runtime
+                .state_presentation("working")
+                .unwrap()
+                .color
+                .as_deref(),
+            Some("#f9e2af")
+        );
+    }
+
+    #[test]
+    fn deferred_theme_wins_after_later_status_config() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.use("themes")
+                tpane.theme("Gruvbox Dark")
+                tpane.options({ status = { style = { bg = "default" } } })
+                "#,
+            )
+            .unwrap();
+
+        assert!(
+            runtime
+                .options()
+                .contains(&("status-style".to_string(), "bg=default".to_string()))
+        );
+        assert!(runtime.run_deferred().is_empty());
+        assert!(runtime.options().contains(&(
+            "status-style".to_string(),
+            "fg=#ebdbb2,bg=#282828".to_string()
+        )));
+    }
+
+    #[test]
+    fn theme_transparent_uses_default_status_background() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.use("themes")
+                tpane.theme("Gruvbox Dark", { transparent = true })
+                "#,
+            )
+            .unwrap();
+        assert!(runtime.run_deferred().is_empty());
+
+        assert!(runtime.options().contains(&(
+            "status-style".to_string(),
+            "fg=#ebdbb2,bg=default".to_string()
+        )));
     }
 
     #[test]

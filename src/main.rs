@@ -72,6 +72,9 @@ enum Commands {
         clean: bool,
     },
 
+    /// List built-in themes.
+    Themes,
+
     /// Manage Lua plugins.
     Plugin {
         #[command(subcommand)]
@@ -139,6 +142,7 @@ fn main() -> Result<()> {
             let response = request(Request::Doctor { clean })?;
             print_response(response)
         }
+        Some(Commands::Themes) => themes(),
         Some(Commands::Plugin { command }) => plugin(command),
         Some(Commands::Control { once, action, id }) => control(once, action, id),
         Some(Commands::Run { name, args }) => run_lua_command(name, args),
@@ -294,7 +298,7 @@ fn builtin_plugin_status(status: &plugins::PluginStatus) -> bool {
 }
 
 fn builtin_plugin_name(name: &str) -> bool {
-    matches!(name, "vim-navigator" | "yank")
+    matches!(name, "vim-navigator" | "yank" | "themes")
 }
 
 fn git_plugin_status_line(status: &plugins::PluginStatus) -> String {
@@ -374,6 +378,13 @@ fn self_update(version: Option<String>) -> Result<()> {
     let status = command.status().context("failed to run tpane updater")?;
     if !status.success() {
         bail!("tpane update failed");
+    }
+    Ok(())
+}
+
+fn themes() -> Result<()> {
+    for name in lua_runtime::builtin_theme_names() {
+        println!("{name}");
     }
     Ok(())
 }
@@ -915,6 +926,12 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn themes_parses_as_builtin_command() {
+        let cli = Cli::try_parse_from(["tpane", "themes"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Themes)));
     }
 
     #[test]

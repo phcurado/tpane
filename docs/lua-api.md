@@ -293,7 +293,28 @@ Built-in plugins:
 ```lua
 tpane.use("vim-navigator")
 tpane.use("yank")
+tpane.use("themes")
 ```
+
+Themes:
+
+```lua
+tpane.use("themes")
+tpane.theme("Catppuccin Mocha")
+
+tpane.theme("Gruvbox Dark", { transparent = true })
+tpane.theme("Gruvbox Dark", { status_bg = "default" })
+```
+
+List bundled themes from the shell:
+
+```sh
+tpane themes
+```
+
+`themes` bundles the iTerm2 Color Schemes collection and applies the selected
+palette to the tmux statusline, tabline, pane borders, and tpane state colors.
+`transparent = true` keeps the terminal background behind the status bar.
 
 Git plugins:
 
@@ -609,6 +630,7 @@ tpane.tmux.display { target = pane.id, message = "message" }
 | `tpane.widgets.*`                           | Built-in widget handles and factories.                           |
 | `tpane.job(opts)`                           | Run shell-backed widget data in the background.                  |
 | `tpane.statusline(opts)`                    | Configure the tmux statusline.                                   |
+| `tpane.theme(name_or_palette[, opts])`      | Apply a theme from the `themes` plugin.                          |
 | `tpane.tabline(opts)`                       | Configure tmux window tabs.                                      |
 | `tpane.panel(opts)`                         | Register a panel.                                                |
 | `tpane.register_pane(name, opts)`           | Register a reusable pane definition.                             |

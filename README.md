@@ -19,8 +19,11 @@ run-shell -b 'tpane'
 Create `~/.config/tmux/tpane/init.lua`:
 
 ```lua
+tpane.use("themes")
 tpane.use("vim-navigator")
 tpane.use("yank")
+
+tpane.theme("Catppuccin Mocha")
 
 tpane.opt.mouse = true
 tpane.opt.history_limit = 5000
@@ -215,6 +218,24 @@ Plugins are referenced from Lua. Built-in plugins load by name:
 ```lua
 tpane.use("vim-navigator")
 tpane.use("yank")
+tpane.use("themes")
+```
+
+The themes plugin bundles the iTerm2 Color Schemes collection:
+
+```sh
+tpane themes
+```
+
+```lua
+tpane.use("themes")
+tpane.theme("Catppuccin Mocha")
+```
+
+Keep the terminal background behind the status bar:
+
+```lua
+tpane.theme("Gruvbox Dark", { transparent = true })
 ```
 
 Git plugins install when first referenced:
