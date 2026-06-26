@@ -53,8 +53,18 @@ jobs:
           name: tpane-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*.tar.gz
 
-  release:
+  publish-crate:
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  release:
+    needs: [build, publish-crate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
