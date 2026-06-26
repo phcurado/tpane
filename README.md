@@ -2,6 +2,10 @@
 
 tpane lets you improve your `tmux.conf` by moving most of your configuration to Lua. It ships with widgets and a plugin system: use widgets to improve your navbar, and plugins to improve your workflow.
 
+## Demo
+
+https://github.com/user-attachments/assets/2e92141d-1e6e-407e-903e-29453cbf95ff
+
 ## Quick start
 
 Install tpane:
