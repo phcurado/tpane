@@ -108,15 +108,6 @@ tpane.unbind("v", { mode = "copy" })
 
 Actions are values you pass to `tpane.bind`.
 
-### `tpane.run`
-
-Run a Lua command registered with `tpane.command`:
-
-```lua
-tpane.bind("x", tpane.run("hello"))
-tpane.bind("x", tpane.run({ "hello", "arg1" }))
-```
-
 ### `tpane.raw`
 
 Run raw tmux commands:
@@ -337,33 +328,6 @@ tpane plugin list        # list installed git plugins
 tpane plugin remove NAME # remove one installed plugin
 ```
 
-## Commands
-
-Use command handles for local key bindings:
-
-```lua
-local hello = tpane.command(function(args)
-  return "hello " .. (args[1] or "")
-end)
-
-tpane.bind("H", hello)
-```
-
-Use named commands only when you want a Lua function callable from the CLI or
-from `tpane.run("name")`:
-
-```lua
-tpane.command("hello", function(args)
-  return "hello " .. (args[1] or "")
-end)
-```
-
-```sh
-tpane run hello world
-```
-
-Named commands must be unique. Registering the same name twice is an error.
-
 ## Reusable panes
 
 Register panes you want to show/hide later:
@@ -571,7 +535,7 @@ tpane.panel {
   title = "Tools",
   cards = function()
     return {
-      { title = "hello", tag = "command", enter = tpane.run("hello") },
+      { title = "logs", tag = "pane", pane = "%1" },
     }
   end,
 }
@@ -636,7 +600,6 @@ tpane.tmux.display { target = pane.id, message = "message" }
 | `tpane.options(table)`                      | Set nested tmux options.                                         |
 | `tpane.bind(key, action, opts)`             | Bind a key.                                                      |
 | `tpane.unbind(key, opts)`                   | Remove a key binding.                                            |
-| `tpane.run(command)`                        | Build an action that runs a Lua command.                         |
 | `tpane.raw(command)`                        | Build an action from raw tmux command text.                      |
 | `tpane.pane.*`                              | Pane actions, lookup, and pane handles.                          |
 | `tpane.window.*`                            | Window actions.                                                  |
@@ -647,8 +610,7 @@ tpane.tmux.display { target = pane.id, message = "message" }
 | `tpane.job(opts)`                           | Run shell-backed widget data in the background.                  |
 | `tpane.statusline(opts)`                    | Configure the tmux statusline.                                   |
 | `tpane.tabline(opts)`                       | Configure tmux window tabs.                                      |
-| `tpane.command(fn)` / `tpane.command(name, fn)` | Create a command handle or named CLI command.                |
-| `tpane.panel(opts)`                         | Register a command/control panel.                                |
+| `tpane.panel(opts)`                         | Register a panel.                                                |
 | `tpane.register_pane(name, opts)`           | Register a reusable pane definition.                             |
 | `tpane.split(target, opts)`                 | Split/open a reusable pane.                                      |
 | `tpane.toggle(target, opts)`                | Toggle a reusable pane.                                          |

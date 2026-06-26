@@ -1262,25 +1262,22 @@ mod tests {
             tpane.on("pane:new", function(_) counts.new = counts.new + 1 end)
             tpane.on("pane:focus", function(p) counts.focus = counts.focus + 1; focused = p.id end)
             tpane.on("tick", function() counts.tick = counts.tick + 1 end)
-            tpane.command{
-              name = "counts",
-              handler = function()
-                return counts.new .. ":" .. counts.focus .. ":" .. counts.tick .. ":" .. focused
-              end,
-            }
+            tpane.command(function()
+              return counts.new .. ":" .. counts.focus .. ":" .. counts.tick .. ":" .. focused
+            end)
             "#,
         );
 
         daemon.update_events(&[pane("%1", true)]);
-        let first = daemon.lua.run_command("counts", &[]).unwrap();
+        let first = daemon.lua.run_command("__tpane_command_1", &[]).unwrap();
         assert_eq!(first.as_deref(), Some("1:1:1:%1"));
 
         daemon.update_events(&[pane("%1", true)]);
-        let second = daemon.lua.run_command("counts", &[]).unwrap();
+        let second = daemon.lua.run_command("__tpane_command_1", &[]).unwrap();
         assert_eq!(second.as_deref(), Some("1:1:2:%1"));
 
         daemon.update_events(&[pane("%1", false), pane("%2", true)]);
-        let third = daemon.lua.run_command("counts", &[]).unwrap();
+        let third = daemon.lua.run_command("__tpane_command_1", &[]).unwrap();
         assert_eq!(third.as_deref(), Some("2:2:3:%2"));
     }
 
@@ -1290,17 +1287,14 @@ mod tests {
             r#"
             closed = ""
             tpane.on("window:close", function(window) closed = window end)
-            tpane.command{
-              name = "closed",
-              handler = function() return closed end,
-            }
+            tpane.command(function() return closed end)
             "#,
         );
 
         daemon.update_events(&[pane_in_window("%1", true, "@1")]);
         daemon.update_events(&[pane_in_window("%2", true, "@2")]);
 
-        let closed = daemon.lua.run_command("closed", &[]).unwrap();
+        let closed = daemon.lua.run_command("__tpane_command_1", &[]).unwrap();
         assert_eq!(closed.as_deref(), Some("@1"));
     }
 

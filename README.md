@@ -2,39 +2,53 @@
 
 tpane lets you improve your `tmux.conf` by moving most of your configuration to Lua. It ships with widgets and a plugin system: use widgets to improve your navbar, and plugins to improve your workflow.
 
-## Quick example
+## Quick start
+
+Install tpane:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/phcurado/tpane/main/install.sh | sh
+```
+
+Add this as the last line of `~/.config/tmux/tmux.conf`:
+
+```tmux
+run-shell -b 'tpane'
+```
+
+Create `~/.config/tmux/tpane/init.lua`:
 
 ```lua
--- ~/.config/tmux/tpane/init.lua
-tpane.use("vim-navigator") -- vim-style pane navigation
-tpane.use("yank")      -- copy-mode clipboard helpers
+tpane.use("vim-navigator")
+tpane.use("yank")
 
--- options
 tpane.opt.mouse = true
 tpane.opt.history_limit = 5000
 tpane.opt.mode_keys = "vi"
 
--- keybinds
 tpane.bind("h", tpane.pane.select("left"))
 tpane.bind("j", tpane.pane.select("down"))
 tpane.bind("k", tpane.pane.select("up"))
 tpane.bind("l", tpane.pane.select("right"))
-tpane.bind("%", tpane.pane.split("right", { cwd = "pane" }))
-tpane.bind('"', tpane.pane.split("down", { cwd = "pane" }))
 
--- navbar
-local project = tpane.widget(function(ctx)
-  return ctx.pane and ctx.pane.cwd_basename or ""
-end)
+local battery = tpane.widgets.battery({ every = "30s" })
 
 tpane.statusline {
   position = "top",
   left = { tpane.widgets.session },
-  right = { project, tpane.widgets.clock },
+  right = { battery, tpane.widgets.clock },
 }
 ```
 
 ## Install
+
+From crates.io:
+
+```sh
+cargo install tpane
+```
+
+Or install the latest GitHub release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/phcurado/tpane/main/install.sh | sh
@@ -64,7 +78,7 @@ unbind C-b
 set -g prefix C-a
 bind C-a send-prefix
 
-# Add tpane here so you can configure all the rest in lua
+# Keep this last.
 run-shell -b 'tpane'
 ```
 
@@ -260,7 +274,6 @@ tpane reload   # reload Lua config
 tpane refresh  # reload and rescan panes
 tpane doctor   # inspect hidden panes/sessions
 tpane update   # update tpane
-tpane run NAME # run a Lua command
 ```
 
 Full Lua reference: [`docs/lua-api.md`](docs/lua-api.md).

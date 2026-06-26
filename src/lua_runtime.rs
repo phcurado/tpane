@@ -409,42 +409,23 @@ impl LuaRuntime {
             .map_err(lua_err)?;
         tpane.set("state", state).map_err(lua_err)?;
 
-        let commands = Rc::clone(&self.commands);
-        let generated_command = Rc::new(Cell::new(0usize));
-        let command = self
-            .lua
-            .create_function(move |lua, args: mlua::MultiValue| {
-                let values = args.into_iter().collect::<Vec<_>>();
-                let (name, handler) = match values.as_slice() {
-                    [Value::Function(handler)] => {
-                        let idx = generated_command.get() + 1;
-                        generated_command.set(idx);
-                        (format!("__tpane_command_{idx}"), handler.clone())
-                    }
-                    [Value::Table(table)] => {
-                        (table.get::<String>("name")?, table.get::<Function>("handler")?)
-                    }
-                    [Value::String(name), Value::Function(handler)] => {
-                        (name.to_string_lossy(), handler.clone())
-                    }
-                    _ => {
-                        return Err(mlua::Error::RuntimeError(
-                            "expected tpane.command(fn), tpane.command(name, fn), or tpane.command{name=..., handler=...}"
-                                .to_string(),
-                        ));
-                    }
-                };
-                if commands.borrow().contains_key(&name) {
-                    return Err(mlua::Error::RuntimeError(format!(
-                        "command already registered: {name}"
-                    )));
-                }
-                let handler = lua.create_registry_value(handler)?;
-                commands.borrow_mut().insert(name.clone(), handler);
-                run_action_table(lua, &[name])
-            })
-            .map_err(lua_err)?;
-        tpane.set("command", command).map_err(lua_err)?;
+        #[cfg(test)]
+        {
+            let commands = Rc::clone(&self.commands);
+            let generated_command = Rc::new(Cell::new(0usize));
+            let command = self
+                .lua
+                .create_function(move |lua, handler: Function| {
+                    let idx = generated_command.get() + 1;
+                    generated_command.set(idx);
+                    let name = format!("__tpane_command_{idx}");
+                    let handler = lua.create_registry_value(handler)?;
+                    commands.borrow_mut().insert(name.clone(), handler);
+                    run_action_table(lua, &[name])
+                })
+                .map_err(lua_err)?;
+            tpane.set("command", command).map_err(lua_err)?;
+        }
 
         let events = Rc::clone(&self.events);
         let on = self
@@ -1326,6 +1307,7 @@ fn parse_bind_command_value(
     }
 }
 
+#[cfg(test)]
 fn run_action_table(lua: &Lua, parts: &[String]) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set("__tpane_action", "run")?;
@@ -2501,7 +2483,7 @@ mod tests {
                 "test.lua",
                 r#"
                 tpane.register_pane("agent", { command = "pi" })
-                tpane.command("check", function()
+                tpane.command(function()
                   local pane = tpane.pane("%1")
                   local cfg = tpane._pane_defs.agent
                   return pane.id .. ":" .. cfg.tag .. ":" .. cfg.name
@@ -2511,7 +2493,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            runtime.run_command("check", &[]).unwrap().as_deref(),
+            runtime
+                .run_command("__tpane_command_1", &[])
+                .unwrap()
+                .as_deref(),
             Some("%1:agent:agent")
         );
     }
@@ -2562,7 +2547,7 @@ mod tests {
                 function tpane.expand()
                   return "custom"
                 end
-                tpane.command("check", function()
+                tpane.command(function()
                   return tpane.expand()
                 end)
                 "#,
@@ -2570,7 +2555,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            runtime.run_command("check", &[]).unwrap().as_deref(),
+            runtime
+                .run_command("__tpane_command_1", &[])
+                .unwrap()
+                .as_deref(),
             Some("custom")
         );
     }
@@ -2592,12 +2580,15 @@ mod tests {
                 "test.lua",
                 r#"
                 local helper = require("lib.helper")
-                tpane.command("check", function() return helper.value end)
+                tpane.command(function() return helper.value end)
                 "#,
             )
             .unwrap();
         assert_eq!(
-            runtime.run_command("check", &[]).unwrap().as_deref(),
+            runtime
+                .run_command("__tpane_command_1", &[])
+                .unwrap()
+                .as_deref(),
             Some("ok")
         );
         let _ = std::fs::remove_dir_all(root);
@@ -2612,10 +2603,10 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.command("write", function()
+                tpane.command(function()
                   tpane.store.set("prefs", { count = 2, items = { "a", "b" } })
                 end)
-                tpane.command("read", function()
+                tpane.command(function()
                   local prefs = tpane.store.get("prefs")
                   return prefs.count .. ":" .. prefs.items[2]
                 end)
@@ -2623,9 +2614,12 @@ mod tests {
             )
             .unwrap();
 
-        runtime.run_command("write", &[]).unwrap();
+        runtime.run_command("__tpane_command_1", &[]).unwrap();
         assert_eq!(
-            runtime.run_command("read", &[]).unwrap().as_deref(),
+            runtime
+                .run_command("__tpane_command_2", &[])
+                .unwrap()
+                .as_deref(),
             Some("2:b")
         );
     }
@@ -2639,14 +2633,17 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.command("write", function()
+                tpane.command(function()
                   tpane.store.set("sparse", { [1] = "a", [3] = "c" })
                 end)
                 "#,
             )
             .unwrap();
 
-        let error = runtime.run_command("write", &[]).unwrap_err().to_string();
+        let error = runtime
+            .run_command("__tpane_command_1", &[])
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("cannot store sparse array table"));
     }
 
@@ -2659,14 +2656,17 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.command("write", function()
+                tpane.command(function()
                   tpane.store.set("mixed", { "a", name = "b" })
                 end)
                 "#,
             )
             .unwrap();
 
-        let error = runtime.run_command("write", &[]).unwrap_err().to_string();
+        let error = runtime
+            .run_command("__tpane_command_1", &[])
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("cannot store table with mixed array and object keys"));
     }
 
@@ -2679,7 +2679,7 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.command("write", function()
+                tpane.command(function()
                   local value = {}
                   value.self = value
                   tpane.store.set("cycle", value)
@@ -2688,7 +2688,10 @@ mod tests {
             )
             .unwrap();
 
-        let error = runtime.run_command("write", &[]).unwrap_err().to_string();
+        let error = runtime
+            .run_command("__tpane_command_1", &[])
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("cannot store recursive table"));
     }
 
@@ -2700,7 +2703,7 @@ mod tests {
                 "test.lua",
                 r#"
                 tpane.workspace { name = "dev", windows = { { name = "app" }, { name = "logs" } } }
-                tpane.command("workspace_count", function()
+                tpane.command(function()
                   return tostring(#tpane._workspaces.dev.windows)
                 end)
                 "#,
@@ -2709,7 +2712,7 @@ mod tests {
 
         assert_eq!(
             runtime
-                .run_command("workspace_count", &[])
+                .run_command("__tpane_command_1", &[])
                 .unwrap()
                 .as_deref(),
             Some("2")
@@ -2729,7 +2732,7 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.command("query", function()
+                tpane.command(function()
                   local one = tpane.find{ tag = "agent" }
                   local all = tpane.find_all{ active = true }
                   return one.id .. ":" .. #all
@@ -2739,7 +2742,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            runtime.run_command("query", &[]).unwrap().as_deref(),
+            runtime
+                .run_command("__tpane_command_1", &[])
+                .unwrap()
+                .as_deref(),
             Some("%2:2")
         );
     }
@@ -2898,7 +2904,7 @@ mod tests {
             .load_source(
                 "test.lua",
                 r##"
-                tpane.command("fmt", function()
+                tpane.command(function()
                   return tpane.fmt.prefix("ON", "off") .. ";" .. tpane.fmt.when("window_zoomed_flag", "Z", "")
                 end)
                 "##,
@@ -2906,7 +2912,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            runtime.run_command("fmt", &[]).unwrap().as_deref(),
+            runtime
+                .run_command("__tpane_command_1", &[])
+                .unwrap()
+                .as_deref(),
             Some("#{?client_prefix,ON,off};#{?window_zoomed_flag,Z,}")
         );
     }
@@ -2919,7 +2928,7 @@ mod tests {
                 "test.lua",
                 r#"
                 tpane.state("approval", { color = "magenta", glyph = "?" })
-                tpane.command("state", function()
+                tpane.command(function()
                   return tpane.state("approval").color .. tpane.state("approval").glyph .. ";" .. tpane.state("idle_seen").color
                 end)
                 "#,
@@ -2927,7 +2936,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            runtime.run_command("state", &[]).unwrap().as_deref(),
+            runtime
+                .run_command("__tpane_command_1", &[])
+                .unwrap()
+                .as_deref(),
             Some("magenta?;green")
         );
     }
@@ -3115,33 +3127,28 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_named_commands_are_rejected() {
+    fn named_commands_are_rejected() {
         let (runtime, _) = runtime();
         let error = runtime
             .load_source(
                 "test.lua",
                 r#"
                 tpane.command("deploy", function() end)
-                tpane.command("deploy", function() end)
                 "#,
             )
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("command already registered: deploy"));
+        assert!(error.contains("error converting Lua string to function"));
     }
 
     #[test]
-    fn short_command_and_panel_names_are_primary_api() {
+    fn short_panel_names_are_primary_api() {
         let (runtime, _) = runtime();
         runtime
             .load_source(
                 "test.lua",
                 r#"
-                tpane.command {
-                  name = "hello",
-                  handler = function() return "hi" end,
-                }
                 tpane.panel {
                   id = "main",
                   title = "Main",
@@ -3151,10 +3158,6 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            runtime.run_command("hello", &[]).unwrap().as_deref(),
-            Some("hi")
-        );
         assert_eq!(runtime.render_panels().unwrap()[0].id, "main");
     }
 
@@ -3165,16 +3168,13 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.command{
-                  name = "hello",
-                  handler = function(args) return "hi " .. args[1] end,
-                }
+                tpane.command(function(args) return "hi " .. args[1] end)
                 "#,
             )
             .unwrap();
 
         let out = runtime
-            .run_command("hello", &["there".to_string()])
+            .run_command("__tpane_command_1", &["there".to_string()])
             .unwrap();
         assert_eq!(out.as_deref(), Some("hi there"));
     }
@@ -3188,15 +3188,15 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.command{
-                  name = "boom",
-                  handler = function() error("nope") end,
-                }
+                tpane.command(function() error("nope") end)
                 "#,
             )
             .unwrap();
 
-        let error = runtime.run_command("boom", &[]).unwrap_err().to_string();
+        let error = runtime
+            .run_command("__tpane_command_1", &[])
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("nope"));
     }
 
@@ -3270,26 +3270,26 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.command{
-                  name = "outer",
-                  handler = function()
-                    tpane.command{
-                      name = "inner",
-                      handler = function() return "inner ok" end,
-                    }
-                    return "outer ok"
-                  end,
-                }
+                tpane.command(function()
+                  tpane.command(function() return "inner ok" end)
+                  return "outer ok"
+                end)
                 "#,
             )
             .unwrap();
 
         assert_eq!(
-            runtime.run_command("outer", &[]).unwrap().as_deref(),
+            runtime
+                .run_command("__tpane_command_1", &[])
+                .unwrap()
+                .as_deref(),
             Some("outer ok")
         );
         assert_eq!(
-            runtime.run_command("inner", &[]).unwrap().as_deref(),
+            runtime
+                .run_command("__tpane_command_2", &[])
+                .unwrap()
+                .as_deref(),
             Some("inner ok")
         );
     }
@@ -3319,18 +3319,15 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.command{
-                  name = "pane_id",
-                  handler = function()
-                    local panes = tpane.panes()
-                    return panes[1].id .. ":" .. panes[1].kind .. ":" .. panes[1].pid .. ":" .. panes[1].tag .. ":" .. panes[1].home .. ":" .. panes[1].state
-                  end,
-                }
+                tpane.command(function()
+                  local panes = tpane.panes()
+                  return panes[1].id .. ":" .. panes[1].kind .. ":" .. panes[1].pid .. ":" .. panes[1].tag .. ":" .. panes[1].home .. ":" .. panes[1].state
+                end)
                 "#,
             )
             .unwrap();
 
-        let out = runtime.run_command("pane_id", &[]).unwrap();
+        let out = runtime.run_command("__tpane_command_1", &[]).unwrap();
         assert_eq!(out.as_deref(), Some("%1:term:123:terminal:@1:idle"));
     }
 
@@ -3341,18 +3338,15 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.command{
-                  name = "method_types",
-                  handler = function()
-                    local p = tpane.pane("%9")
-                    return p.id .. ":" .. type(p.set) .. ":" .. type(p.var) .. ":" .. type(p.capture)
-                  end,
-                }
+                tpane.command(function()
+                  local p = tpane.pane("%9")
+                  return p.id .. ":" .. type(p.set) .. ":" .. type(p.var) .. ":" .. type(p.capture)
+                end)
                 "#,
             )
             .unwrap();
 
-        let out = runtime.run_command("method_types", &[]).unwrap();
+        let out = runtime.run_command("__tpane_command_1", &[]).unwrap();
         assert_eq!(out.as_deref(), Some("%9:function:function:function"));
     }
 
@@ -3364,18 +3358,15 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.command{
-                  name = "running",
-                  handler = function()
-                    local p = tpane.panes()[1]
-                    return tostring(p:running("zsh")) .. ":" .. p:proc_tree():list()[1].argv .. ":" .. p.cwd_basename
-                  end,
-                }
+                tpane.command(function()
+                  local p = tpane.panes()[1]
+                  return tostring(p:running("zsh")) .. ":" .. p:proc_tree():list()[1].argv .. ":" .. p.cwd_basename
+                end)
                 "#,
             )
             .unwrap();
 
-        let out = runtime.run_command("running", &[]).unwrap();
+        let out = runtime.run_command("__tpane_command_1", &[]).unwrap();
         assert_eq!(out.as_deref(), Some("true:zsh:tpane"));
     }
 
@@ -3387,18 +3378,15 @@ mod tests {
             .load_source(
                 "test.lua",
                 r#"
-                tpane.command{
-                  name = "method_types",
-                  handler = function()
-                    local p = tpane.panes()[1]
-                    return type(p.set) .. ":" .. type(p.var) .. ":" .. type(p.capture)
-                  end,
-                }
+                tpane.command(function()
+                  local p = tpane.panes()[1]
+                  return type(p.set) .. ":" .. type(p.var) .. ":" .. type(p.capture)
+                end)
                 "#,
             )
             .unwrap();
 
-        let out = runtime.run_command("method_types", &[]).unwrap();
+        let out = runtime.run_command("__tpane_command_1", &[]).unwrap();
         assert_eq!(out.as_deref(), Some("function:function:function"));
     }
 
@@ -3412,10 +3400,7 @@ mod tests {
                 seen = ""
                 tpane.on("pane:new", function(p) seen = p.id end)
                 tpane.on("pane:new", function() error("bad event") end)
-                tpane.command{
-                  name = "seen",
-                  handler = function() return seen end,
-                }
+                tpane.command(function() return seen end)
                 "#,
             )
             .unwrap();
@@ -3423,7 +3408,7 @@ mod tests {
         let errors = runtime.fire_event("pane:new", Some(&pane("%9")));
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("bad event"));
-        let out = runtime.run_command("seen", &[]).unwrap();
+        let out = runtime.run_command("__tpane_command_1", &[]).unwrap();
         assert_eq!(out.as_deref(), Some("%9"));
     }
 
@@ -3436,16 +3421,13 @@ mod tests {
                 r#"
                 seen = ""
                 tpane.on("window:close", function(window) seen = window end)
-                tpane.command{
-                  name = "seen",
-                  handler = function() return seen end,
-                }
+                tpane.command(function() return seen end)
                 "#,
             )
             .unwrap();
 
         assert!(runtime.fire_event_text("window:close", "@9").is_empty());
-        let out = runtime.run_command("seen", &[]).unwrap();
+        let out = runtime.run_command("__tpane_command_1", &[]).unwrap();
         assert_eq!(out.as_deref(), Some("@9"));
     }
 
