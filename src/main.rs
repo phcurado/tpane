@@ -30,7 +30,7 @@ use crossterm::{
 use protocol::{PaneSnapshot, PanelView, Request, Response};
 
 #[derive(Debug, Parser)]
-#[command(name = "tpane")]
+#[command(name = "tpane", version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

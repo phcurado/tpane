@@ -55,7 +55,7 @@ From crates.io:
 cargo install tpane
 ```
 
-Or install the latest GitHub release:
+Or install the latest GitHub release with the install script:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/phcurado/tpane/main/install.sh | sh
@@ -65,6 +65,18 @@ From source:
 
 ```sh
 cargo install --path . --locked --force
+```
+
+With mise:
+
+```sh
+mise use -g github:phcurado/tpane@latest
+```
+
+This installs from the GitHub release assets and lets mise manage updates:
+
+```sh
+mise upgrade github:phcurado/tpane
 ```
 
 ## Minimal tmux.conf
