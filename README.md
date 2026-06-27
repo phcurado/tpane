@@ -290,4 +290,4 @@ tpane themes      # list bundled themes
 tpane update      # update tpane
 ```
 
-The full API can be found in [`docs/lua-api.md`](docs/lua-api.md).
+More docs start at [`docs/index.md`](docs/index.md).
