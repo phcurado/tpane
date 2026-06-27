@@ -1,22 +1,53 @@
 # Lua API
 
-tpane loads top-level `*.lua` files under:
+This page documents what you can use inside `~/.config/tmux/tpane/*.lua`.
+Use it as a reference when you want to move tmux options, key bindings, status
+bar config, plugins, pane helpers, or small bits of behavior into Lua.
+
+A minimal setup looks like this:
+
+```tmux
+# ~/.config/tmux/tmux.conf
+run-shell -b 'tpane'
+```
+
+```lua
+-- ~/.config/tmux/tpane/init.lua
+tpane.opt.mouse = true
+tpane.bind("h", tpane.pane.select("left"))
+tpane.statusline { right = { tpane.widgets.clock } }
+```
+
+Reload from inside tmux with:
+
+```sh
+tpane reload
+```
+
+Check errors with:
+
+```sh
+tpane status
+```
+
+## Config files
+
+tpane loads top-level Lua files from:
 
 ```text
 ~/.config/tmux/tpane
 ```
 
-Set `TPANE_CONFIG_DIR` to use another directory.
+Set `TPANE_CONFIG_DIR` to load config from somewhere else.
 
-Files in subdirectories are not auto-loaded. Use Lua's `require`:
+Files in subdirectories are not loaded automatically. Use `require` for shared
+modules:
 
 ```lua
 local colors = require("theme.colors") -- ~/.config/tmux/tpane/theme/colors.lua
 ```
 
-## Replacing tmux.conf
-
-### Options
+## Options
 
 Use `tpane.opt` for normal tmux options:
 
@@ -28,26 +59,35 @@ tpane.opt.renumber_windows = true   -- set -g renumber-windows on
 tpane.opt.escape_time = 0           -- set -g escape-time 0
 ```
 
-### Appending to tmux options
-
-Some tmux options are usually extended instead of replaced. In `tmux.conf` that
-looks like this:
-
-```tmux
-set -ga update-environment TERM
-set -ga update-environment TERM_PROGRAM
-```
-
-In Lua, use `tpane.append`:
+Use `tpane.append` when you would use `set -ga` in tmux:
 
 ```lua
 tpane.append("update_environment", "TERM")
 tpane.append("update_environment", "TERM_PROGRAM")
 ```
 
-### Key bindings
+`tpane.options` is the table form of the same API. Use it when you want to set
+several related options together:
 
-Use `tpane.bind(key, action[, opts])`:
+```lua
+tpane.options {
+  status_style = { bg = "default" },
+  pane_border_style = { fg = "#51576d" },
+}
+```
+
+Nested tables are flattened into tmux option names, so this is equivalent:
+
+```lua
+tpane.options {
+  status = { style = { bg = "default" } },
+  pane = { border = { style = { fg = "#51576d" } } },
+}
+```
+
+## Key bindings
+
+`tpane.bind` connects a key to an action.
 
 ```lua
 tpane.bind("h", tpane.pane.select("left"))
@@ -56,23 +96,30 @@ tpane.bind("k", tpane.pane.select("up"))
 tpane.bind("l", tpane.pane.select("right"))
 ```
 
-By default, bindings uses tmux's prefix. Use `prefix = false` for keybindings that are not using tmux prefix:
+Bindings use the tmux prefix by default. Pass `prefix = false` for root bindings:
 
 ```lua
 tpane.bind("M-Left", tpane.pane.resize("left", 10), { prefix = false })
 ```
 
-Use `mode = "copy"` for copy mode:
+Copy-mode bindings go in tmux's copy-mode key table. This example enters copy
+mode with `<prefix> [` and then uses `v`, `r`, and `y` inside copy mode:
 
 ```lua
+tpane.bind("[", "copy-mode")
 tpane.bind("v", tpane.copy.begin(), { mode = "copy" })
 tpane.bind("r", tpane.copy.rectangle(), { mode = "copy" })
 tpane.bind("y", tpane.copy.copy(), { mode = "copy" })
 ```
 
-### Lua key handlers
+`mode = "copy"` maps to tmux's `copy-mode-vi` table. If you want another tmux
+key table, pass it directly:
 
-A binding can run Lua. The handler receives the pane that invoked the binding:
+```lua
+tpane.bind("y", tpane.copy.copy(), { table = "copy-mode" })
+```
+
+A binding can also run a Lua functions. The callback receives the pane that pressed the key:
 
 ```lua
 tpane.bind("L", function(pane)
@@ -80,15 +127,13 @@ tpane.bind("L", function(pane)
 end)
 ```
 
-### Raw tmux commands
-
-If tpane does not have a helper for something, you can write the tmux command directly:
+Use raw tmux commands when there is no helper:
 
 ```lua
 tpane.bind("R", "source-file ~/.config/tmux/tmux.conf ; display 'reloaded'")
 ```
 
-For multiple raw commands, use `tpane.raw` with a list:
+For multiple raw commands, use `tpane.raw`:
 
 ```lua
 tpane.bind("C-S-l", tpane.raw({
@@ -97,7 +142,7 @@ tpane.bind("C-S-l", tpane.raw({
 }), { prefix = false })
 ```
 
-### Unbinding
+Remove a binding with `tpane.unbind`:
 
 ```lua
 tpane.unbind("C-b")
@@ -106,152 +151,190 @@ tpane.unbind("v", { mode = "copy" })
 
 ## Actions
 
-Actions are values you pass to `tpane.bind`.
+Actions are values you pass to `tpane.bind`. They are helpers for common tmux
+commands.
 
-### `tpane.raw`
-
-Run raw tmux commands:
-
-```lua
-tpane.raw("select-pane -L")
-tpane.raw({ "swap-window -t +1", "select-window -t +1" })
-```
-
-### Pane actions
+Pane actions:
 
 ```lua
-tpane.pane.select("left")
-tpane.pane.select("right")
-tpane.pane.select("up")
-tpane.pane.select("down")
+-- Move between panes.
+tpane.bind("h", tpane.pane.select("left"))
+tpane.bind("j", tpane.pane.select("down"))
+tpane.bind("k", tpane.pane.select("up"))
+tpane.bind("l", tpane.pane.select("right"))
 
-tpane.pane.resize("left", 10)
-tpane.pane.resize("right", 10)
-tpane.pane.resize("up", 5)
-tpane.pane.resize("down", 5)
+-- Resize panes without the prefix.
+tpane.bind("M-Left", tpane.pane.resize("left", 10), { prefix = false })
+tpane.bind("M-Right", tpane.pane.resize("right", 10), { prefix = false })
 
-tpane.pane.split("right", { cwd = "pane" })
-tpane.pane.split("down", { cwd = "pane" })
-tpane.pane.split("left")
-tpane.pane.split("up")
+-- Split panes.
+tpane.bind("%", tpane.pane.split("right", { cwd = "pane" }))
+tpane.bind('"', tpane.pane.split("down", { cwd = "pane" }))
 ```
 
-`cwd = "pane"` means use the current pane's directory.
+`cwd = "pane"` is tpane shorthand for tmux's `-c "#{pane_current_path}"`.
+Use it with `tpane.pane.split` or `tpane.window.new` when the new pane/window
+should start in the current pane's directory.
 
-### Window actions
+Window actions:
 
 ```lua
-tpane.window.new({ cwd = "pane" })
-tpane.window.swap("next")
-tpane.window.swap("prev")
+-- New window in the current pane's directory.
+tpane.bind("c", tpane.window.new({ cwd = "pane" }))
+
+-- Reorder the current window.
+tpane.bind(">", tpane.window.swap("next"))
+tpane.bind("<", tpane.window.swap("prev"))
 ```
 
-### Copy-mode actions
+Copy-mode actions:
 
 ```lua
-tpane.copy.begin()
-tpane.copy.begin({ rectangle = true })
-tpane.copy.rectangle()
-tpane.copy.copy()
+-- Enter copy mode with <prefix> [, then select/copy with vi-like keys.
+tpane.bind("[", "copy-mode")
+tpane.bind("v", tpane.copy.begin(), { mode = "copy" })
+tpane.bind("r", tpane.copy.rectangle(), { mode = "copy" })
+tpane.bind("y", tpane.copy.copy(), { mode = "copy" })
 ```
 
-### Key actions
+`tpane.copy.begin({ rectangle = true })` starts selection and toggles rectangle
+mode in one binding:
 
 ```lua
-tpane.key.prefix()
+tpane.bind("C-v", tpane.copy.begin({ rectangle = true }), { mode = "copy" })
 ```
 
-## Status bar and tabs
-
-### Widgets
-
-A widget is a Lua function that returns text, a styled table, a list of parts, or
-`nil` to hide itself.
+Send the prefix key to the pane:
 
 ```lua
-local host = tpane.widget(function()
-  return os.getenv("HOSTNAME") or ""
-end)
-
-local mode = tpane.widget(function(ctx)
-  if ctx.pane and ctx.pane.zoomed then
-    return { text = "zoom", fg = "yellow", bold = true }
-  end
-end)
+-- Optional. This makes <prefix> C-a send C-a to the program in the pane.
+-- Useful for nested tmux sessions.
+tpane.bind("C-a", tpane.key.prefix())
 ```
 
-Widget context:
+This is the Lua version of tmux's `bind C-a send-prefix`. You only need it if
+you want a way to pass the prefix key through to the pane.
+
+## Status bar
+
+`tpane.statusline` defines what appears on the left and right side of the tmux
+status bar.
 
 ```lua
-ctx.session  -- current session name
-ctx.window   -- current window id, like @2
-ctx.pane     -- current pane object, or nil
-ctx.panes    -- all pane objects
+tpane.statusline {
+  position = "top",
+  left = { tpane.widgets.session, tpane.widgets.tabs },
+  right = { tpane.widgets.clock },
+}
 ```
 
-Built-in widgets live under `tpane.widgets`.
+The values in `left` and `right` are widgets. A widget can be a built-in widget,
+a custom Lua widget, or a job-backed widget.
 
-Plain widgets are handles:
+### Built-in widgets
+
+| Widget                        | Description                                                |
+| ----------------------------- | ---------------------------------------------------------- |
+| `tpane.widgets.session`       | Current tmux session.                                      |
+| `tpane.widgets.host`          | Hostname from tmux.                                        |
+| `tpane.widgets.clock`         | Current time, like `14:30`.                                |
+| `tpane.widgets.date`          | Current date, like `Jun 25`.                               |
+| `tpane.widgets.prefix`        | Shows when the tmux prefix key is active.                  |
+| `tpane.widgets.tabs`          | tmux window list.                                          |
+| `tpane.widgets.cpu(opts)`     | CPU usage. Works on Linux and macOS.                       |
+| `tpane.widgets.memory(opts)`  | Used memory. Works on Linux and macOS.                     |
+| `tpane.widgets.battery(opts)` | Battery status with icons. Works on Linux and macOS.       |
+| `tpane.widgets.player(opts)`  | Current playing track. Uses `playerctl`, Music or Spotify. |
+
+Plain widgets are used directly:
 
 ```lua
-tpane.widgets.session
-tpane.widgets.host
-tpane.widgets.clock
-tpane.widgets.date
-tpane.widgets.prefix
+tpane.statusline {
+  left = { tpane.widgets.session, tpane.widgets.tabs },
+  right = { tpane.widgets.clock },
+}
 ```
 
-Job-backed widgets are factories. Call them once, then put the returned handle in
-your statusline:
+Widgets that take `opts` start background work. Call them once, store the result,
+and use that result in the statusline:
 
 ```lua
 local cpu = tpane.widgets.cpu({ every = "2s" })
 local memory = tpane.widgets.memory({ every = "5s" })
 local battery = tpane.widgets.battery({ every = "30s" })
-local player = tpane.widgets.player({ every = "5s" })
 
 tpane.statusline {
-  right = { player, cpu, memory, battery, tpane.widgets.clock },
+  right = { cpu, memory, battery, tpane.widgets.clock },
 }
 ```
 
-Raw tmux format strings also work:
+### Custom widgets
+
+Use `tpane.widget` when you want to render your own widget. The function runs when
+tpane renders the status bar.
 
 ```lua
-local prefix = tpane.widget(function()
-  return tpane.fmt.prefix("PREFIX", "")
+local cwd = tpane.widget(function(ctx)
+  return ctx.pane and ctx.pane.cwd_basename or ""
+end)
+
+tpane.statusline {
+  left = { tpane.widgets.session, cwd },
+  right = { tpane.widgets.clock },
+}
+```
+
+The `ctx` argument contains the tmux state available while rendering:
+
+| Field         | Description                      |
+| ------------- | -------------------------------- |
+| `ctx.session` | Current session name.            |
+| `ctx.window`  | Current window id, like `@2`.    |
+| `ctx.pane`    | Current pane object, or `nil`.   |
+| `ctx.panes`   | All pane objects known to tpane. |
+
+A widget can return a string:
+
+```lua
+local server = tpane.widget(function()
+  return "server"
 end)
 ```
 
-### Statusline
+To style the text, return a table with `text` plus style fields:
 
 ```lua
-tpane.statusline {
-  position = "top",
-  interval = 1,
-  left = { tpane.widgets.session },
-  right = { host, mode, tpane.widgets.clock },
-  separator = "  ",
-}
+local status = tpane.widget(function()
+  return { text = "ok", fg = "green", bold = true }
+end)
 ```
 
-For a multiline status bar, use `rows`:
+That renders `ok` in green and bold in the status bar. Return `nil` or an empty
+string to show nothing.
 
-```lua
-tpane.statusline {
-  position = "top",
-  rows = {
-    { left = { tpane.widgets.session }, right = { tpane.widgets.clock } },
-    { left = { tpane.widgets.tabs }, right = { tpane.widgets.prefix } },
-  },
-}
-```
+Style fields:
 
-### Jobs
+| Field           | Value             | Description                                               |
+| --------------- | ----------------- | --------------------------------------------------------- |
+| `text`          | string            | Text to show.                                             |
+| `fg`            | string            | Foreground color, like `"green"` or `"#8caaee"`.          |
+| `bg`            | string            | Background color.                                         |
+| `bold`          | boolean           | Bold text.                                                |
+| `dim`           | boolean           | Dim text.                                                 |
+| `italics`       | boolean           | Italic text.                                              |
+| `blink`         | boolean           | Blinking text.                                            |
+| `reverse`       | boolean           | Swap foreground and background.                           |
+| `hidden`        | boolean           | Hidden text.                                              |
+| `strikethrough` | boolean           | Struck-through text.                                      |
+| `underscore`    | boolean or string | Underline. Strings are passed to tmux as underline style. |
+| `align`         | string            | tmux alignment style value.                               |
+| `fill`          | string            | tmux fill style value.                                    |
 
-Use jobs for widget data that comes from shell commands. Jobs run in the
-background on their own interval and return a handle that widgets can render.
-Status rendering does not block on the command.
+### Shell command widgets
+
+Use `tpane.job` for status bar data that comes from a shell command. Jobs run in
+the background on their own interval, so the status bar does not block while the
+command is running.
 
 ```lua
 local uptime = tpane.job({
@@ -268,27 +351,23 @@ tpane.statusline {
 `every` and `timeout` can be seconds or a string ending in `s`, `m`, or `h`.
 `timeout` defaults to `10s`.
 
-```lua
-tpane.job({ every = 30, timeout = "5s", cmd = "acpi -b" })
-tpane.job({ every = "5s", timeout = "2s", cmd = "playerctl metadata title" })
-```
+### Multiline status bar
 
-### Styled parts
+Use `rows` for a multiline status bar:
 
 ```lua
-return { text = "ok", fg = "green", bold = true }
+tpane.statusline {
+  position = "top",
+  rows = {
+    { left = { tpane.widgets.session }, right = { tpane.widgets.clock } },
+    { left = { tpane.widgets.tabs }, right = { tpane.widgets.prefix } },
+  },
+}
 ```
 
-Supported style keys:
+## Window tabs
 
-```text
-fg, bg, bold, dim, italics, blink, reverse, hidden, strikethrough, underscore,
-align, fill
-```
-
-### Tabline
-
-`tpane.tabline` writes the common `window-status-format` options for you:
+Use `tpane.tabline` to configure tmux window tabs:
 
 ```lua
 tpane.tabline {
@@ -298,11 +377,9 @@ tpane.tabline {
 }
 ```
 
-## Plugins
+## Plugins and themes
 
-Plugins are referenced from Lua with `tpane.use`. See [plugins.md](plugins.md) for plugin details.
-
-Built-in plugins:
+Use `tpane.use` to load a plugin from your Lua config:
 
 ```lua
 tpane.use("sensible")
@@ -311,35 +388,7 @@ tpane.use("yank")
 tpane.use("themes")
 ```
 
-`sensible` applies a small set of common tmux defaults:
-
-```lua
-tpane.use("sensible")
-```
-
-It sets options like lower escape delay, larger history, and focus events.
-
-Themes:
-
-```lua
-tpane.use("themes")
-tpane.theme("Catppuccin Mocha")
-
-tpane.theme("Gruvbox Dark", { transparent = true })
-tpane.theme("Gruvbox Dark", { status_bg = "default" })
-```
-
-List bundled themes from the shell:
-
-```sh
-tpane themes
-```
-
-`themes` bundles the iTerm2 Color Schemes collection and applies the selected
-palette to the tmux statusline, tabline, pane borders, and tpane state colors.
-`transparent = true` keeps the terminal background behind the status bar.
-
-Git plugins:
+External plugins use the same function with a repo spec:
 
 ```lua
 tpane.use("theme", {
@@ -348,33 +397,30 @@ tpane.use("theme", {
 })
 ```
 
-Monorepo plugin path:
+See [plugins.md](plugins.md) for the built-in plugins, git plugin options, and
+plugin management commands.
+
+Themes are applied with `tpane.theme` after loading the `themes` plugin:
 
 ```lua
-tpane.use("tool", {
-  repo = "https://github.com/example/tools.git",
-  path = "plugins/tpane-tool",
-})
+tpane.use("themes")
+tpane.theme("Catppuccin Mocha")
+tpane.theme("Gruvbox Dark", { transparent = true })
 ```
 
-`repo` is the git URL. `url` also works. `branch`, `tag`, and `rev` are mutually
-exclusive. `path` is relative to the repo and uses sparse checkout.
-
-Plugin commands:
+List bundled themes with:
 
 ```sh
-tpane plugin status      # show referenced, installed, dirty, and update state
-tpane plugin sync        # install/update plugins referenced by Lua config
-tpane plugin update      # update all installed plugins
-tpane plugin update NAME # update one plugin
-tpane plugin clean       # remove installed plugins not referenced by Lua config
-tpane plugin list        # list installed git plugins
-tpane plugin remove NAME # remove one installed plugin
+tpane themes
 ```
 
 ## Reusable panes
 
-Register panes you want to show/hide later:
+Reusable panes are named panes that tpane can show, hide, and restore. Use them
+for logs, REPLs, shells, database consoles, or watchers that should keep running
+when hidden.
+
+Register the pane once:
 
 ```lua
 tpane.register_pane("logs", {
@@ -384,7 +430,7 @@ tpane.register_pane("logs", {
 })
 ```
 
-Use key handlers to control it:
+Control it from a key binding:
 
 ```lua
 tpane.bind("L", function(pane)
@@ -414,7 +460,7 @@ label = "logs"
 blocked_message = "..."      -- shown instead of hiding a blocked pane
 ```
 
-Use `tpane.split` when you want a one-off split instead of a registered pane:
+Use `tpane.split` for a one-off split instead of a registered pane:
 
 ```lua
 local pane = tpane.split(current, {
@@ -426,73 +472,188 @@ local pane = tpane.split(current, {
 
 ## Pane objects
 
-Kind callbacks, key handlers, events, widgets, and `tpane.panes()` use pane
-objects.
+A pane object is how tpane represents one tmux pane in Lua. It gives you the
+pane id, current directory, command, window, state, and helper methods.
 
-Fields:
+tpane passes pane objects to callbacks that work with a specific pane:
 
 ```lua
-pane.id            -- tmux pane id, like %3
-pane.pid           -- root process pid
-pane.cwd           -- current directory
-pane.cwd_basename  -- last path component of cwd
-pane.command       -- tmux pane_current_command
-pane.session       -- session name
-pane.window        -- window id, like @2
-pane.active        -- true if focused
-pane.zoomed        -- true if window is zoomed
-pane.kind          -- detected kind
-pane.label         -- shown label
-pane.tag           -- user tag set by tpane
-pane.home          -- home window for stashed panes
-pane.state         -- current state, if any
+-- Key handler: pane is the pane that pressed the key.
+tpane.bind("L", function(pane)
+  tpane.toggle(pane, "logs")
+end)
+
+-- Widget: ctx.pane is the pane being used to render the status bar.
+local cwd = tpane.widget(function(ctx)
+  return ctx.pane and ctx.pane.cwd_basename or ""
+end)
+
+-- Kind detection: pane is each pane tpane is scanning.
+tpane.kind {
+  name = "editor",
+  detect = function(pane)
+    return pane:running("nvim")
+  end,
+}
 ```
 
-Methods:
+### Pane fields
+
+| Field               | Description                                                            |
+| ------------------- | ---------------------------------------------------------------------- |
+| `pane.id`           | tmux pane id, like `%3`. Use this when calling low-level tmux helpers. |
+| `pane.pid`          | Root process pid for the pane.                                         |
+| `pane.cwd`          | Current directory of the pane.                                         |
+| `pane.cwd_basename` | Last path component of `pane.cwd`.                                     |
+| `pane.command`      | tmux `pane_current_command`, usually the foreground command name.      |
+| `pane.session`      | tmux session name.                                                     |
+| `pane.window`       | tmux window id, like `@2`.                                             |
+| `pane.active`       | `true` when the pane is focused.                                       |
+| `pane.zoomed`       | `true` when the pane's window is zoomed.                               |
+| `pane.kind`         | Kind detected by `tpane.kind`, if any.                                 |
+| `pane.label`        | Label shown by tpane for this pane, if any.                            |
+| `pane.tag`          | Custom tag stored on the pane. Useful for finding panes later.         |
+| `pane.home`         | Home window for a stashed pane.                                        |
+| `pane.state`        | Current pane state, if one was detected or set.                        |
+
+### Pane methods
+
+| Method               | Description                                                                  |
+| -------------------- | ---------------------------------------------------------------------------- |
+| `pane:running(name)` | Returns `true` if the pane's process tree contains a command with that name. |
+| `pane:var(name)`     | Reads a tmux pane variable, such as `@my_var` or `@tpane_tag`.               |
+| `pane:set(values)`   | Sets tpane pane metadata: `kind`, `label`, `state`, `tag`, or `home`.        |
+| `pane:capture()`     | Returns the pane's visible text, like `tmux capture-pane`.                   |
+| `pane:proc_tree()`   | Returns the pane's process tree. Use it for custom process checks.           |
+
+Examples:
 
 ```lua
-pane:running("psql")
-pane:var("@tmux_var")
-pane:set { tag = "logs", label = "logs" }
-pane:capture()
-pane:proc_tree()
-```
+-- Label panes running psql.
+tpane.kind {
+  name = "database",
+  detect = function(pane)
+    return pane:running("psql")
+  end,
+}
 
-Process tree example:
+-- Show the current directory in the status bar.
+local cwd = tpane.widget(function(ctx)
+  return ctx.pane and ctx.pane.cwd_basename or ""
+end)
 
-```lua
-pane:proc_tree():any(function(proc)
-  return proc.argv:match("--watch") ~= nil
+-- Mark the current pane so it can be found later.
+tpane.bind("T", function(pane)
+  pane:set { tag = "terminal", label = "terminal" }
+end)
+
+-- Jump back to the marked pane.
+tpane.bind("G", function()
+  local terminal = tpane.find { tag = "terminal" }
+  if terminal then
+    tpane.tmux.select(terminal.id)
+  end
 end)
 ```
 
-Find panes:
+Use `pane:capture()` to read the visible text in a pane. This is useful when the
+process name is not enough and the output tells you what is happening:
 
 ```lua
-local logs = tpane.find { tag = "logs" }
-local all_logs = tpane.find_all { tag = "logs" }
+-- Mark a worker pane as blocked/working by reading its output.
+tpane.kind {
+  name = "worker",
+  match = "worker",
+  state = function(pane)
+    local text = pane:capture()
+    if text:match("blocked") then return "blocked" end
+    if text:match("running") then return "working" end
+  end,
+}
 ```
 
-All fields in the query must match.
+Use `pane:proc_tree()` to inspect all processes running under the pane. This is useful for commands hidden behind shells,
+scripts, package managers, etc:
+
+```lua
+-- Detect a test watcher even if the pane command is just `zsh` or `npm`.
+tpane.kind {
+  name = "test watcher",
+  detect = function(pane)
+    return pane:proc_tree():any(function(proc)
+      return proc.argv:match("--watch") ~= nil
+    end)
+  end,
+}
+```
+
+A process has:
+
+| Field       | Description        |
+| ----------- | ------------------ |
+| `proc.pid`  | Process id.        |
+| `proc.ppid` | Parent process id. |
+| `proc.argv` | Full command line. |
+
+Use `tpane.find` when you want to do something with a pane you tagged or
+identified earlier:
+
+```lua
+tpane.bind("G", function()
+  local logs = tpane.find { tag = "logs" }
+  if logs then
+    tpane.tmux.select(logs.id)
+  end
+end)
+```
+
+`tpane.find` returns the first match. `tpane.find_all` returns every match. All
+fields in the query must match.
 
 ## Kinds and states
 
-A kind tells tpane what a pane is.
+Use kinds when you want tpane to recognize what a pane is and reuse that
+information elsewhere.
+
+For example let's say you want to label a panel that if it's running `psql`, it should be labeled as `database`:
 
 ```lua
 tpane.kind { name = "database", match = "psql" }
 ```
 
-When a pane is running `psql`:
+Now you can act on that pane without remembering its tmux id:
 
 ```lua
-pane.kind  -- database
-pane.label -- database
+tpane.bind("D", function()
+  local db = tpane.find { kind = "database" }
+  if db then
+    tpane.tmux.select(db.id)
+  end
+end)
 ```
 
-Use `detect` for custom matching:
+You can also show the recognized pane type in the status bar:
 
 ```lua
+local pane_label = tpane.widget(function(ctx)
+  return ctx.pane and ctx.pane.label or ""
+end)
+```
+
+### Matching panes
+
+Use `match` for a simple command-name check:
+
+```lua
+-- Any pane running nvim becomes an editor pane.
+tpane.kind { name = "editor", match = "nvim" }
+```
+
+Use `detect` when the check needs more than a command name. It receives a pane
+and returns `true` when the pane should get that kind:
+
+```lua
+-- A node process only counts as a server when it is in a server directory.
 tpane.kind {
   name = "server",
   detect = function(pane)
@@ -501,7 +662,10 @@ tpane.kind {
 }
 ```
 
-Use `label` to change what is shown:
+### Labels
+
+The label is the display text for a matched pane. By default it is the kind name.
+Use `label` when the display text should include pane-specific information:
 
 ```lua
 tpane.kind {
@@ -513,81 +677,133 @@ tpane.kind {
 }
 ```
 
-Kinds can report state:
+If Neovim is running in `/home/me/project`, the label is `editor project`.
+
+### States
+
+A state is a short status attached to a pane. Use it when the pane can be
+working, blocked, waiting, done, etc.
 
 ```lua
+-- Read a worker pane's output and expose it as pane.state.
 tpane.kind {
   name = "worker",
   match = "worker",
   state = function(pane)
-    if pane:capture():match("blocked") then return "blocked" end
-    if pane:capture():match("running") then return "working" end
+    local text = pane:capture()
+    if text:match("blocked") then return "blocked" end
+    if text:match("running") then return "working" end
     return "idle"
   end,
 }
 ```
 
-Built-in state presentations:
+Then use that state in a widget:
 
-```text
-approval
-blocked
-working
-done_unseen
-idle_seen
+```lua
+local state = tpane.widget(function(ctx)
+  return ctx.pane and ctx.pane.state or ""
+end)
 ```
 
-Declare custom state presentation:
+Built-in states:
+
+| State         | Meaning                                          |
+| ------------- | ------------------------------------------------ |
+| `approval`    | Waiting for approval.                            |
+| `blocked`     | Blocked or needs attention.                      |
+| `working`     | Work is in progress.                             |
+| `done_unseen` | Finished, but the pane has not been focused yet. |
+| `idle_seen`   | Finished/idle and already seen.                  |
+
+If a state function returns `done`, tpane shows it as `done_unseen` until the
+pane is focused.
+
+Add your own state style with `tpane.state`:
 
 ```lua
 tpane.state("waiting", { color = "yellow", glyph = "…" })
-local presentation = tpane.state("waiting")
 ```
-
-Returning `done` from detection is treated as `done_unseen` until the pane is
-focused.
 
 ## Store
 
-`tpane.store` is a small JSON-backed store for config and plugins.
+`tpane.store` persists small Lua values across reloads.
+
+It is shared by the whole tpane config for the current tmux server. It is not
+scoped per plugin, so choose keys that will not collide with other config or
+plugins.
+
+```lua
+tpane.store.set("my-plugin.counter", 1)
+tpane.store.set("layout.last-project", "tpane")
+```
+
+Avoid generic keys in plugins:
 
 ```lua
 tpane.store.set("counter", 1)
-local value = tpane.store.get("counter")
-tpane.store.delete("counter")
+tpane.store.set("enabled", true)
+```
+
+Read and delete values with the same key:
+
+```lua
+local count = tpane.store.get("my-plugin.counter")
+tpane.store.delete("my-plugin.counter")
 ```
 
 Values may be strings, numbers, booleans, tables, or nil.
 
 ## Events
 
+Use `tpane.on` to register callbacks for tmux changes. The callback is called
+when that event happens.
+
+| Event          | Callback argument    | When it fires                 |
+| -------------- | -------------------- | ----------------------------- |
+| `tick`         | none                 | On each tpane scan.           |
+| `pane:new`     | pane object          | When tpane sees a new pane.   |
+| `pane:focus`   | pane object          | When the active pane changes. |
+| `window:close` | window id, like `@2` | When a window disappears.     |
+| `state:change` | pane id, like `%3`   | When a pane state changes.    |
+
+Example: show a tmux message when focusing a pane recognized as a database:
+
 ```lua
-tpane.on("tick", function() end)
-tpane.on("pane:new", function(pane) end)
-tpane.on("pane:focus", function(pane) end)
-tpane.on("window:close", function(window_id) end)
-tpane.on("state:change", function(pane_id) end)
+tpane.on("pane:focus", function(pane)
+  if pane.kind == "database" then
+    tpane.tmux.display { target = pane.id, message = "database pane" }
+  end
+end)
 ```
 
-## Panels
-
-Panels are simple TUI views shown by `tpane control`.
+Example: keep a counter of how many panes were created in this tmux server:
 
 ```lua
-tpane.panel {
-  id = "tools",
-  title = "Tools",
-  cards = function()
-    return {
-      { title = "logs", tag = "pane", pane = "%1" },
-    }
-  end,
-}
+tpane.on("pane:new", function()
+  local count = tpane.store.get("stats.panes-created") or 0
+  tpane.store.set("stats.panes-created", count + 1)
+end)
 ```
+
+Example: react when a worker pane changes state:
+
+```lua
+tpane.on("state:change", function(pane_id)
+  local pane = tpane.pane(pane_id)
+  if pane.state == "blocked" then
+    tpane.tmux.display { target = pane.id, message = "worker is blocked" }
+  end
+end)
+```
+
+Keep event callbacks short. If you need to run a shell command on a timer, use
+`tpane.job` instead of `tick`.
 
 ## Workspaces
 
-A workspace is a named tmux layout. You can call `tpane.apply_workspace(name)` from a command or key binding to activate the workspace:
+A workspace is a named tmux layout. Register it in Lua, then apply it from a key
+binding or command.
 
 ```lua
 tpane.workspace {
@@ -645,7 +861,7 @@ tpane.tmux.display { target = pane.id, message = "message" }
 | `tpane.bind(key, action, opts)`        | Bind a key.                                                      |
 | `tpane.unbind(key, opts)`              | Remove a key binding.                                            |
 | `tpane.raw(command)`                   | Build an action from raw tmux command text.                      |
-| `tpane.pane.*`                         | Pane actions, lookup, and pane handles.                          |
+| `tpane.pane.*`                         | Pane actions.                                                    |
 | `tpane.window.*`                       | Window actions.                                                  |
 | `tpane.copy.*`                         | Copy-mode actions.                                               |
 | `tpane.key.*`                          | Key helpers such as `tpane.key.prefix()`.                        |
@@ -655,7 +871,6 @@ tpane.tmux.display { target = pane.id, message = "message" }
 | `tpane.statusline(opts)`               | Configure the tmux statusline.                                   |
 | `tpane.theme(name_or_palette[, opts])` | Apply a theme from the `themes` plugin.                          |
 | `tpane.tabline(opts)`                  | Configure tmux window tabs.                                      |
-| `tpane.panel(opts)`                    | Register a panel.                                                |
 | `tpane.register_pane(name, opts)`      | Register a reusable pane definition.                             |
 | `tpane.split(target, opts)`            | Split/open a reusable pane.                                      |
 | `tpane.toggle(target, opts)`           | Toggle a reusable pane.                                          |
@@ -667,7 +882,7 @@ tpane.tmux.display { target = pane.id, message = "message" }
 | `tpane.panes()`                        | Return current pane objects.                                     |
 | `tpane.find(query)`                    | Find one pane by fields.                                         |
 | `tpane.find_all(query)`                | Find all panes by fields.                                        |
-| `tpane.kind(name, opts)`               | Register pane detection.                                         |
+| `tpane.kind(def)`                      | Register pane detection.                                         |
 | `tpane.state(name, opts)`              | Register state presentation.                                     |
 | `tpane.on(event, fn)`                  | Register an event handler.                                       |
 | `tpane.store`                          | Persistent Lua key-value store.                                  |
