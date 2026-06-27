@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1 - 2026-06-27
+
+### Features
+
+- add multiline statusline rows
+
 ## 0.5.0 - 2026-06-26
 
 ### Features

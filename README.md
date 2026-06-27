@@ -157,6 +157,18 @@ tpane.statusline {
 }
 ```
 
+Use rows for a multiline status bar:
+
+```lua
+tpane.statusline {
+  position = "top",
+  rows = {
+    { left = { tpane.widgets.session }, right = { tpane.widgets.clock } },
+    { left = { tpane.widgets.host }, right = { tpane.widgets.prefix } },
+  },
+}
+```
+
 Built-in widgets:
 
 | Widget                        | Description                                                 |

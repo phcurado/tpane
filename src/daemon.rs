@@ -103,6 +103,8 @@ struct Daemon {
     status_right: String,
     status_position: Option<String>,
     status_interval: Option<u64>,
+    status_rows: Option<usize>,
+    status_formats: HashMap<usize, String>,
     options: HashMap<String, String>,
     job_data: Rc<RefCell<HashMap<String, String>>>,
     job_last_run: HashMap<String, Instant>,
@@ -141,6 +143,8 @@ impl Daemon {
             status_right: String::new(),
             status_position: None,
             status_interval: None,
+            status_rows: None,
+            status_formats: HashMap::new(),
             options: HashMap::new(),
             job_data,
             job_last_run: HashMap::new(),
@@ -315,6 +319,8 @@ impl Daemon {
         self.status_right.clear();
         self.status_position = None;
         self.status_interval = None;
+        self.status_rows = None;
+        self.status_formats.clear();
         self.options.clear();
         self.pane_borders.clear();
         self.pane_vars.clear();
@@ -564,7 +570,8 @@ impl Daemon {
         }
 
         let status = self.lua.status_options();
-        self.apply_status_position_interval(status.position, status.interval)
+        self.apply_status_position_interval(status.position, status.interval)?;
+        self.apply_status_rows(status.rows)
     }
 
     fn apply_status_position_interval(
@@ -591,10 +598,51 @@ impl Daemon {
         Ok(())
     }
 
+    fn apply_status_rows(&mut self, rows: Option<usize>) -> Result<()> {
+        if rows != self.status_rows {
+            if let Some(rows) = rows {
+                let value = if rows == 1 {
+                    "on".to_string()
+                } else {
+                    rows.to_string()
+                };
+                tmux::set_global_var("status", &value)?;
+                self.status_rows = Some(rows);
+            } else if self.status_rows.is_some() {
+                tmux::unset_global_var("status")?;
+                self.status_rows = None;
+            }
+        }
+        Ok(())
+    }
+
+    fn update_status_formats(&mut self, formats: Vec<(usize, String)>) -> Result<()> {
+        let next = formats.into_iter().collect::<HashMap<_, _>>();
+        for index in self
+            .status_formats
+            .keys()
+            .filter(|index| !next.contains_key(*index))
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            tmux::unset_global_var(&format!("status-format[{index}]"))?;
+            self.status_formats.remove(&index);
+        }
+        for (index, value) in next {
+            if self.status_formats.get(&index) != Some(&value) {
+                tmux::set_global_var(&format!("status-format[{index}]"), &value)?;
+                self.status_formats.insert(index, value);
+            }
+        }
+        Ok(())
+    }
+
     fn update_statusline(&mut self, current_pane_id: Option<&str>) -> Result<()> {
         let (status, errors) = self.lua.render_statusline(current_pane_id);
         self.record_runtime_errors(errors);
         self.apply_status_position_interval(status.position, status.interval)?;
+        self.apply_status_rows(status.rows)?;
+        self.update_status_formats(status.formats)?;
         match status.left {
             Some(left) if left != self.status_left => {
                 tmux::set_status("left", &left)?;
@@ -1175,6 +1223,8 @@ mod tests {
             status_right: String::new(),
             status_position: None,
             status_interval: None,
+            status_rows: None,
+            status_formats: HashMap::new(),
             options: HashMap::new(),
             job_data,
             job_last_run: HashMap::new(),
@@ -1230,6 +1280,8 @@ mod tests {
         daemon.status_right = "right".to_string();
         daemon.status_position = Some("top".to_string());
         daemon.status_interval = Some(1);
+        daemon.status_rows = Some(2);
+        daemon.status_formats.insert(1, "extra".to_string());
         daemon.options.insert("mouse".to_string(), "on".to_string());
         daemon
             .pane_borders
@@ -1249,6 +1301,8 @@ mod tests {
         assert!(daemon.status_right.is_empty());
         assert!(daemon.status_position.is_none());
         assert!(daemon.status_interval.is_none());
+        assert!(daemon.status_rows.is_none());
+        assert!(daemon.status_formats.is_empty());
         assert!(daemon.options.is_empty());
         assert!(daemon.pane_borders.is_empty());
         assert!(daemon.pane_vars.is_empty());

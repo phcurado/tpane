@@ -84,6 +84,14 @@ struct StatusLineDef {
     interval: Option<u64>,
     left: Option<Vec<StatusItem>>,
     right: Option<Vec<StatusItem>>,
+    rows: Vec<StatusRowDef>,
+    separator: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusRowDef {
+    left: Option<Vec<StatusItem>>,
+    right: Option<Vec<StatusItem>>,
     separator: String,
 }
 
@@ -97,8 +105,10 @@ enum StatusItem {
 pub struct StatusRender {
     pub position: Option<String>,
     pub interval: Option<u64>,
+    pub rows: Option<usize>,
     pub left: Option<String>,
     pub right: Option<String>,
+    pub formats: Vec<(usize, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -699,8 +709,10 @@ impl LuaRuntime {
             .map(|def| StatusRender {
                 position: def.position.clone(),
                 interval: def.interval,
+                rows: (!def.rows.is_empty()).then_some(def.rows.len()),
                 left: None,
                 right: None,
+                formats: Vec::new(),
             })
             .unwrap_or_default()
     }
@@ -756,17 +768,33 @@ impl LuaRuntime {
         let left = def.left.as_ref().map(|widgets| {
             self.render_status_slot(widgets, &def.separator, ctx.clone(), &mut errors)
         });
-        let right = def
-            .right
-            .as_ref()
-            .map(|widgets| self.render_status_slot(widgets, &def.separator, ctx, &mut errors));
+        let right = def.right.as_ref().map(|widgets| {
+            self.render_status_slot(widgets, &def.separator, ctx.clone(), &mut errors)
+        });
+        let formats = def
+            .rows
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(index, row)| {
+                let left = row.left.as_ref().map(|widgets| {
+                    self.render_status_slot(widgets, &row.separator, ctx.clone(), &mut errors)
+                });
+                let right = row.right.as_ref().map(|widgets| {
+                    self.render_status_slot(widgets, &row.separator, ctx.clone(), &mut errors)
+                });
+                (index, status_format_row(left.as_deref(), right.as_deref()))
+            })
+            .collect();
 
         (
             StatusRender {
                 position: def.position,
                 interval: def.interval,
+                rows: (!def.rows.is_empty()).then_some(def.rows.len()),
                 left,
                 right,
+                formats,
             },
             errors,
         )
@@ -990,6 +1018,15 @@ fn collect_lua_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+fn status_format_row(left: Option<&str>, right: Option<&str>) -> String {
+    match (left, right) {
+        (Some(left), Some(right)) => format!("{left}#[align=right]{right}"),
+        (Some(left), None) => left.to_string(),
+        (None, Some(right)) => format!("#[align=right]{right}"),
+        (None, None) => String::new(),
+    }
+}
+
 fn parse_statusline_def(table: Table) -> mlua::Result<StatusLineDef> {
     let position = table.get::<Option<String>>("position")?;
     if let Some(position) = &position
@@ -999,15 +1036,55 @@ fn parse_statusline_def(table: Table) -> mlua::Result<StatusLineDef> {
             "statusline position must be top or bottom, got {position}"
         )));
     }
+    let separator = table
+        .get::<Option<String>>("separator")?
+        .unwrap_or_else(|| "  ".to_string());
+    let rows = parse_status_rows(table.get("rows")?, &separator)?;
+    let (left, right) = if let Some(row) = rows.first() {
+        (row.left.clone(), row.right.clone())
+    } else {
+        (
+            parse_status_slot(table.get("left")?)?,
+            parse_status_slot(table.get("right")?)?,
+        )
+    };
     Ok(StatusLineDef {
         position,
         interval: table.get("interval")?,
-        left: parse_status_slot(table.get("left")?)?,
-        right: parse_status_slot(table.get("right")?)?,
-        separator: table
-            .get::<Option<String>>("separator")?
-            .unwrap_or_else(|| "  ".to_string()),
+        left,
+        right,
+        rows,
+        separator,
     })
+}
+
+fn parse_status_rows(value: Value, default_separator: &str) -> mlua::Result<Vec<StatusRowDef>> {
+    match value {
+        Value::Nil => Ok(Vec::new()),
+        Value::Table(table) => {
+            if table.raw_len() > 5 {
+                return Err(mlua::Error::RuntimeError(
+                    "statusline supports at most 5 rows".to_string(),
+                ));
+            }
+            table
+                .sequence_values::<Table>()
+                .map(|row| {
+                    let row = row?;
+                    Ok(StatusRowDef {
+                        left: parse_status_slot(row.get("left")?)?,
+                        right: parse_status_slot(row.get("right")?)?,
+                        separator: row
+                            .get::<Option<String>>("separator")?
+                            .unwrap_or_else(|| default_separator.to_string()),
+                    })
+                })
+                .collect()
+        }
+        other => Err(mlua::Error::RuntimeError(format!(
+            "statusline rows must be a list of row tables, got {other:?}"
+        ))),
+    }
 }
 
 fn parse_status_slot(value: Value) -> mlua::Result<Option<Vec<StatusItem>>> {
@@ -3209,6 +3286,61 @@ mod tests {
         assert_eq!(status.interval, Some(1));
         assert_eq!(status.left.as_deref(), Some("#{session_name}"));
         assert_eq!(status.right.as_deref(), Some("#[fg=red,bold]x#[default]"));
+    }
+
+    #[test]
+    fn statusline_rows_render_extra_status_formats() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                local session = tpane.widget(function() return "session" end)
+                local cwd = tpane.widget(function() return "cwd" end)
+                local clock = tpane.widget(function() return "clock" end)
+                tpane.statusline {
+                  rows = {
+                    { left = { session }, right = { clock } },
+                    { left = { cwd }, right = { tpane.widgets.prefix } },
+                  }
+                }
+                "#,
+            )
+            .unwrap();
+
+        let (status, errors) = runtime.render_statusline(None);
+        assert!(errors.is_empty());
+        assert_eq!(status.rows, Some(2));
+        assert_eq!(status.left.as_deref(), Some("session"));
+        assert_eq!(status.right.as_deref(), Some("clock"));
+        assert_eq!(
+            status.formats,
+            vec![(1, "cwd#[align=right]#{?client_prefix,  ,  }".to_string())]
+        );
+    }
+
+    #[test]
+    fn statusline_rows_are_limited_to_tmux_max() {
+        let (runtime, _) = runtime();
+        let error = runtime
+            .load_source(
+                "test.lua",
+                r#"
+                local w = tpane.widget(function() return "x" end)
+                tpane.statusline { rows = {
+                  { left = { w } },
+                  { left = { w } },
+                  { left = { w } },
+                  { left = { w } },
+                  { left = { w } },
+                  { left = { w } },
+                } }
+                "#,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("statusline supports at most 5 rows"));
     }
 
     #[test]

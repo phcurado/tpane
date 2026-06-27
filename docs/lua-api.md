@@ -233,6 +233,18 @@ tpane.statusline {
 }
 ```
 
+For a multiline status bar, use `rows`:
+
+```lua
+tpane.statusline {
+  position = "top",
+  rows = {
+    { left = { tpane.widgets.session }, right = { tpane.widgets.clock } },
+    { left = { host }, right = { tpane.widgets.prefix } },
+  },
+}
+```
+
 ### Jobs
 
 Use jobs for widget data that comes from shell commands. Jobs run in the
