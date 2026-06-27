@@ -659,10 +659,6 @@ impl LuaRuntime {
             .map_err(|error| anyhow!("failed to load built-in Lua kinds: {error}"))
     }
 
-    pub fn kind_count(&self) -> usize {
-        self.kinds.borrow().len()
-    }
-
     pub fn keybinds(&self) -> Vec<Keybind> {
         self.keybinds.borrow().clone()
     }
@@ -765,36 +761,50 @@ impl LuaRuntime {
                 None
             }
         };
+        if !def.rows.is_empty() {
+            let formats = def
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    let left = row.left.as_ref().map(|widgets| {
+                        self.render_status_slot(widgets, &row.separator, ctx.clone(), &mut errors)
+                    });
+                    let right = row.right.as_ref().map(|widgets| {
+                        self.render_status_slot(widgets, &row.separator, ctx.clone(), &mut errors)
+                    });
+                    (index, status_format_row(left.as_deref(), right.as_deref()))
+                })
+                .collect();
+
+            return (
+                StatusRender {
+                    position: def.position,
+                    interval: def.interval,
+                    rows: Some(def.rows.len()),
+                    left: None,
+                    right: None,
+                    formats,
+                },
+                errors,
+            );
+        }
+
         let left = def.left.as_ref().map(|widgets| {
             self.render_status_slot(widgets, &def.separator, ctx.clone(), &mut errors)
         });
         let right = def.right.as_ref().map(|widgets| {
             self.render_status_slot(widgets, &def.separator, ctx.clone(), &mut errors)
         });
-        let formats = def
-            .rows
-            .iter()
-            .enumerate()
-            .skip(1)
-            .map(|(index, row)| {
-                let left = row.left.as_ref().map(|widgets| {
-                    self.render_status_slot(widgets, &row.separator, ctx.clone(), &mut errors)
-                });
-                let right = row.right.as_ref().map(|widgets| {
-                    self.render_status_slot(widgets, &row.separator, ctx.clone(), &mut errors)
-                });
-                (index, status_format_row(left.as_deref(), right.as_deref()))
-            })
-            .collect();
 
         (
             StatusRender {
                 position: def.position,
                 interval: def.interval,
-                rows: (!def.rows.is_empty()).then_some(def.rows.len()),
+                rows: None,
                 left,
                 right,
-                formats,
+                formats: Vec::new(),
             },
             errors,
         )
@@ -1040,13 +1050,13 @@ fn parse_statusline_def(table: Table) -> mlua::Result<StatusLineDef> {
         .get::<Option<String>>("separator")?
         .unwrap_or_else(|| "  ".to_string());
     let rows = parse_status_rows(table.get("rows")?, &separator)?;
-    let (left, right) = if let Some(row) = rows.first() {
-        (row.left.clone(), row.right.clone())
-    } else {
+    let (left, right) = if rows.is_empty() {
         (
             parse_status_slot(table.get("left")?)?,
             parse_status_slot(table.get("right")?)?,
         )
+    } else {
+        (None, None)
     };
     Ok(StatusLineDef {
         position,
@@ -3056,7 +3066,12 @@ mod tests {
                     "pane-active-border-style".to_string(),
                     "fg=#8caaee".to_string()
                 ),
+                (
+                    "pane-border-format".to_string(),
+                    "#{@tpane_border}".to_string()
+                ),
                 ("pane-border-lines".to_string(), "heavy".to_string()),
+                ("pane-border-status".to_string(), "top".to_string()),
                 ("pane-border-style".to_string(), "fg=#51576d".to_string()),
                 ("status-left-length".to_string(), "120".to_string()),
                 (
@@ -3301,7 +3316,7 @@ mod tests {
                 tpane.statusline {
                   rows = {
                     { left = { session }, right = { clock } },
-                    { left = { cwd }, right = { tpane.widgets.prefix } },
+                    { left = { cwd, tpane.widgets.tabs }, right = { tpane.widgets.prefix } },
                   }
                 }
                 "#,
@@ -3311,11 +3326,17 @@ mod tests {
         let (status, errors) = runtime.render_statusline(None);
         assert!(errors.is_empty());
         assert_eq!(status.rows, Some(2));
-        assert_eq!(status.left.as_deref(), Some("session"));
-        assert_eq!(status.right.as_deref(), Some("clock"));
+        assert_eq!(status.left, None);
+        assert_eq!(status.right, None);
         assert_eq!(
             status.formats,
-            vec![(1, "cwd#[align=right]#{?client_prefix,  ,  }".to_string())]
+            vec![
+                (0, "session#[align=right]clock".to_string()),
+                (
+                    1,
+                    "cwd  #{W:#{E:window-status-format} ,#{E:window-status-current-format} }#[align=right]#{?client_prefix,  ,  }".to_string()
+                )
+            ]
         );
     }
 

@@ -18,6 +18,10 @@ tpane.widgets.prefix = tpane.widget(function()
   return tpane.fmt.prefix("  ", "  ")
 end)
 
+tpane.widgets.tabs = tpane.widget(function()
+  return "#{W:#{E:window-status-format} ,#{E:window-status-current-format} }"
+end)
+
 local battery_cmd = [[
 if [ "$(uname)" = "Darwin" ]; then
   pmset -g batt 2>/dev/null | awk '

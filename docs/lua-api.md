@@ -240,7 +240,7 @@ tpane.statusline {
   position = "top",
   rows = {
     { left = { tpane.widgets.session }, right = { tpane.widgets.clock } },
-    { left = { host }, right = { tpane.widgets.prefix } },
+    { left = { tpane.widgets.tabs }, right = { tpane.widgets.prefix } },
   },
 }
 ```
@@ -625,40 +625,40 @@ tpane.tmux.display { target = pane.id, message = "message" }
 
 ## Public API
 
-| API                                         | Purpose                                                          |
-| ------------------------------------------- | ---------------------------------------------------------------- |
-| `tpane.use(name_or_spec)`                   | Load a built-in or git plugin.                                   |
-| `tpane.opt`                                 | Set tmux options with assignment, like `tpane.opt.mouse = true`. |
-| `tpane.append(name, value)`                 | Append to tmux options such as `update-environment`.             |
-| `tpane.options(table)`                      | Set nested tmux options.                                         |
-| `tpane.bind(key, action, opts)`             | Bind a key.                                                      |
-| `tpane.unbind(key, opts)`                   | Remove a key binding.                                            |
-| `tpane.raw(command)`                        | Build an action from raw tmux command text.                      |
-| `tpane.pane.*`                              | Pane actions, lookup, and pane handles.                          |
-| `tpane.window.*`                            | Window actions.                                                  |
-| `tpane.copy.*`                              | Copy-mode actions.                                               |
-| `tpane.key.*`                               | Key helpers such as `tpane.key.prefix()`.                        |
-| `tpane.widget(fn)`                          | Create a widget handle.                                          |
-| `tpane.widgets.*`                           | Built-in widget handles and factories.                           |
-| `tpane.job(opts)`                           | Run shell-backed widget data in the background.                  |
-| `tpane.statusline(opts)`                    | Configure the tmux statusline.                                   |
-| `tpane.theme(name_or_palette[, opts])`      | Apply a theme from the `themes` plugin.                          |
-| `tpane.tabline(opts)`                       | Configure tmux window tabs.                                      |
-| `tpane.panel(opts)`                         | Register a panel.                                                |
-| `tpane.register_pane(name, opts)`           | Register a reusable pane definition.                             |
-| `tpane.split(target, opts)`                 | Split/open a reusable pane.                                      |
-| `tpane.toggle(target, opts)`                | Toggle a reusable pane.                                          |
-| `tpane.show(target, opts)`                  | Show a reusable pane.                                            |
-| `tpane.hide(target, opts)`                  | Hide a reusable pane.                                            |
-| `tpane.expand(target, opts)`                | Zoom or expand a pane.                                           |
-| `tpane.workspace(def)`                      | Register a named layout.                                         |
-| `tpane.apply_workspace(name)`               | Apply a registered layout once.                                  |
-| `tpane.panes()`                             | Return current pane objects.                                     |
-| `tpane.find(query)`                         | Find one pane by fields.                                         |
-| `tpane.find_all(query)`                     | Find all panes by fields.                                        |
-| `tpane.kind(name, opts)`                    | Register pane detection.                                         |
-| `tpane.state(name, opts)`                   | Register state presentation.                                     |
-| `tpane.on(event, fn)`                       | Register an event handler.                                       |
-| `tpane.store`                               | Persistent Lua key-value store.                                  |
-| `tpane.tmux`                                | Low-level tmux helpers.                                          |
-| `tpane.fmt`                                 | tmux format helpers.                                             |
+| API                                    | Purpose                                                          |
+| -------------------------------------- | ---------------------------------------------------------------- |
+| `tpane.use(name_or_spec)`              | Load a built-in or git plugin.                                   |
+| `tpane.opt`                            | Set tmux options with assignment, like `tpane.opt.mouse = true`. |
+| `tpane.append(name, value)`            | Append to tmux options such as `update-environment`.             |
+| `tpane.options(table)`                 | Set nested tmux options.                                         |
+| `tpane.bind(key, action, opts)`        | Bind a key.                                                      |
+| `tpane.unbind(key, opts)`              | Remove a key binding.                                            |
+| `tpane.raw(command)`                   | Build an action from raw tmux command text.                      |
+| `tpane.pane.*`                         | Pane actions, lookup, and pane handles.                          |
+| `tpane.window.*`                       | Window actions.                                                  |
+| `tpane.copy.*`                         | Copy-mode actions.                                               |
+| `tpane.key.*`                          | Key helpers such as `tpane.key.prefix()`.                        |
+| `tpane.widget(fn)`                     | Create a widget handle.                                          |
+| `tpane.widgets.*`                      | Built-in widget handles and factories.                           |
+| `tpane.job(opts)`                      | Run shell-backed widget data in the background.                  |
+| `tpane.statusline(opts)`               | Configure the tmux statusline.                                   |
+| `tpane.theme(name_or_palette[, opts])` | Apply a theme from the `themes` plugin.                          |
+| `tpane.tabline(opts)`                  | Configure tmux window tabs.                                      |
+| `tpane.panel(opts)`                    | Register a panel.                                                |
+| `tpane.register_pane(name, opts)`      | Register a reusable pane definition.                             |
+| `tpane.split(target, opts)`            | Split/open a reusable pane.                                      |
+| `tpane.toggle(target, opts)`           | Toggle a reusable pane.                                          |
+| `tpane.show(target, opts)`             | Show a reusable pane.                                            |
+| `tpane.hide(target, opts)`             | Hide a reusable pane.                                            |
+| `tpane.expand(target, opts)`           | Zoom or expand a pane.                                           |
+| `tpane.workspace(def)`                 | Register a named layout.                                         |
+| `tpane.apply_workspace(name)`          | Apply a registered layout once.                                  |
+| `tpane.panes()`                        | Return current pane objects.                                     |
+| `tpane.find(query)`                    | Find one pane by fields.                                         |
+| `tpane.find_all(query)`                | Find all panes by fields.                                        |
+| `tpane.kind(name, opts)`               | Register pane detection.                                         |
+| `tpane.state(name, opts)`              | Register state presentation.                                     |
+| `tpane.on(event, fn)`                  | Register an event handler.                                       |
+| `tpane.store`                          | Persistent Lua key-value store.                                  |
+| `tpane.tmux`                           | Low-level tmux helpers.                                          |
+| `tpane.fmt`                            | tmux format helpers.                                             |

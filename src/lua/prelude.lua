@@ -138,6 +138,15 @@ function tpane.tabline(opts)
   }
 end
 
+tpane.options {
+  pane = {
+    border = {
+      status = "top",
+      format = "#{@tpane_border}",
+    },
+  },
+}
+
 tpane.state("approval", { color = "yellow", glyph = "" })
 tpane.state("blocked", { color = "red", glyph = "" })
 tpane.state("working", { color = "yellow", glyph = "" })

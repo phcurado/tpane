@@ -28,12 +28,6 @@ pub fn has_session(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn install_render_options() -> Result<()> {
-    tmux(&["set-option", "-g", "pane-border-status", "top"])?;
-    tmux(&["set-option", "-g", "pane-border-format", "#{@tpane_border}"])?;
-    Ok(())
-}
-
 pub fn list_panes() -> Result<Vec<PaneInfo>> {
     let output = tmux(&[
         "list-panes",

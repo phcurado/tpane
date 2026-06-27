@@ -164,7 +164,7 @@ tpane.statusline {
   position = "top",
   rows = {
     { left = { tpane.widgets.session }, right = { tpane.widgets.clock } },
-    { left = { tpane.widgets.host }, right = { tpane.widgets.prefix } },
+    { left = { tpane.widgets.tabs }, right = { tpane.widgets.prefix } },
   },
 }
 ```

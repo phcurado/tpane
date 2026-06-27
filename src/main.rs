@@ -155,7 +155,6 @@ fn launch() -> Result<()> {
         bail!("tpane must be run from tmux. Add this to tmux.conf: run-shell -b 'tpane'");
     }
 
-    tmux::install_render_options()?;
     ensure_daemon()
 }
 

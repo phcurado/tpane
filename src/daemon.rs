@@ -167,11 +167,7 @@ impl Daemon {
                 Err(error) => Response::error(error),
             },
             Request::Reload => match self.reload_plugins() {
-                Ok(()) => Response::ok(Some(format!(
-                    "reloaded {} kinds, {} errors",
-                    self.lua.kind_count(),
-                    self.load_errors.len()
-                ))),
+                Ok(()) => Response::ok(Some(self.reload_message())),
                 Err(error) => Response::error(error),
             },
             Request::Status => {
@@ -216,6 +212,26 @@ impl Daemon {
                 }
             }
         }
+    }
+
+    fn reload_message(&self) -> String {
+        let mut plugins = self
+            .lua
+            .used_plugin_specs()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        plugins.sort();
+
+        let mut lines = vec!["reloaded tpane config".to_string()];
+        if !plugins.is_empty() {
+            lines.push("plugins:".to_string());
+            lines.extend(plugins.into_iter().map(|plugin| format!("  - {plugin}")));
+        }
+        if !self.load_errors.is_empty() {
+            lines.push(format!("errors: {}", self.load_errors.len()));
+        }
+        lines.join("\n")
     }
 
     fn reload_plugins(&mut self) -> Result<()> {
@@ -1235,6 +1251,21 @@ mod tests {
             pane_vars: HashMap::new(),
             config_sig: Vec::new(),
         }
+    }
+
+    #[test]
+    fn reload_message_lists_plugins_on_separate_lines() {
+        let daemon = test_daemon(
+            r#"
+            tpane.use("themes")
+            tpane.use("yank")
+        "#,
+        );
+
+        assert_eq!(
+            daemon.reload_message(),
+            "reloaded tpane config\nplugins:\n  - themes\n  - yank"
+        );
     }
 
     #[test]
