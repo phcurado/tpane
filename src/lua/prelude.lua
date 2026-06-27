@@ -91,6 +91,14 @@ function tpane.window.new(opts)
   return raw(command)
 end
 
+function tpane.window.previous()
+  return raw("previous-window")
+end
+
+function tpane.window.next()
+  return raw("next-window")
+end
+
 function tpane.window.swap(direction)
   if direction == "next" or direction == "right" then
     return raw("swap-window -t +1 ; select-window -t +1")

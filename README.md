@@ -178,15 +178,20 @@ Built-in widgets:
 | `tpane.widgets.clock`         | Current time, like `14:30`.                                 |
 | `tpane.widgets.date`          | Current date, like `Jun 25`.                                |
 | `tpane.widgets.prefix`        | Shows when tmux prefix is active.                           |
+| `tpane.widgets.tabs`          | tmux window tabs.                                           |
+| `tpane.widgets.cpu(opts)`     | CPU usage. Works on Linux and macOS.                        |
+| `tpane.widgets.memory(opts)`  | Used memory. Works on Linux and macOS.                      |
 | `tpane.widgets.battery(opts)` | Battery status with icons. Works on Linux and macOS.        |
 | `tpane.widgets.player(opts)`  | Current playing track. Uses `playerctl`, Music, or Spotify. |
 
 ```lua
+local cpu = tpane.widgets.cpu({ every = "2s" })
+local memory = tpane.widgets.memory({ every = "5s" })
 local battery = tpane.widgets.battery({ every = "30s" })
 local player = tpane.widgets.player({ every = "5s" })
 
 tpane.statusline {
-  right = { player, battery, tpane.widgets.clock },
+  right = { player, cpu, memory, battery, tpane.widgets.clock },
 }
 ```
 
@@ -229,9 +234,12 @@ tpane.options {
 
 ## Plugins
 
+See [docs/plugins.md](docs/plugins.md) for plugin details.
+
 Plugins are referenced from Lua. Built-in plugins load by name:
 
 ```lua
+tpane.use("sensible")
 tpane.use("vim-navigator")
 tpane.use("yank")
 tpane.use("themes")

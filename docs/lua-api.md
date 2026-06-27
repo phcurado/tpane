@@ -205,11 +205,13 @@ Job-backed widgets are factories. Call them once, then put the returned handle i
 your statusline:
 
 ```lua
+local cpu = tpane.widgets.cpu({ every = "2s" })
+local memory = tpane.widgets.memory({ every = "5s" })
 local battery = tpane.widgets.battery({ every = "30s" })
 local player = tpane.widgets.player({ every = "5s" })
 
 tpane.statusline {
-  right = { player, battery, tpane.widgets.clock },
+  right = { player, cpu, memory, battery, tpane.widgets.clock },
 }
 ```
 
@@ -298,15 +300,24 @@ tpane.tabline {
 
 ## Plugins
 
-Plugins are referenced from Lua with `tpane.use`.
+Plugins are referenced from Lua with `tpane.use`. See [plugins.md](plugins.md) for plugin details.
 
 Built-in plugins:
 
 ```lua
+tpane.use("sensible")
 tpane.use("vim-navigator")
 tpane.use("yank")
 tpane.use("themes")
 ```
+
+`sensible` applies a small set of common tmux defaults:
+
+```lua
+tpane.use("sensible")
+```
+
+It sets options like lower escape delay, larger history, and focus events.
 
 Themes:
 

@@ -1754,6 +1754,10 @@ fn load_plugin(lua: &Lua, name: &str, spec: &PluginSpec) -> mlua::Result<()> {
             .load(BUILTIN_PLUGIN_YANK)
             .set_name("builtin/plugins/yank/init.lua")
             .exec(),
+        "sensible" => lua
+            .load(BUILTIN_PLUGIN_SENSIBLE)
+            .set_name("builtin/plugins/sensible/init.lua")
+            .exec(),
         "themes" => {
             let tpane: Table = lua.globals().get("tpane")?;
             tpane.set("_theme_data", BUILTIN_PLUGIN_THEMES_DATA)?;
@@ -2399,6 +2403,7 @@ const WIDGETS: &str = include_str!("lua/widgets.lua");
 
 const BUILTIN_PLUGIN_VIM_NAVIGATOR: &str = include_str!("../plugins/vim-navigator/init.lua");
 const BUILTIN_PLUGIN_YANK: &str = include_str!("../plugins/yank/init.lua");
+const BUILTIN_PLUGIN_SENSIBLE: &str = include_str!("../plugins/sensible/init.lua");
 const BUILTIN_PLUGIN_THEMES: &str = include_str!("../plugins/themes/init.lua");
 const BUILTIN_PLUGIN_THEMES_DATA: &str = include_str!("../plugins/themes/palettes.tsv");
 
@@ -2542,6 +2547,8 @@ mod tests {
                 tpane.bind("M-a", tpane.pane.select("left"), { prefix = false })
                 tpane.bind("%", tpane.pane.split("right", { cwd = "pane" }))
                 tpane.bind("C-S-l", tpane.window.swap("next"), { prefix = false })
+                tpane.bind("p", tpane.window.previous())
+                tpane.bind("n", tpane.window.next())
                 "#,
             )
             .unwrap();
@@ -2585,6 +2592,22 @@ mod tests {
                     mode: "root".to_string(),
                     key: "C-S-l".to_string(),
                     command: vec!["swap-window -t +1 ; select-window -t +1".to_string()],
+                    raw: true,
+                    context: false,
+                    popup: false,
+                },
+                Keybind {
+                    mode: "prefix".to_string(),
+                    key: "p".to_string(),
+                    command: vec!["previous-window".to_string()],
+                    raw: true,
+                    context: false,
+                    popup: false,
+                },
+                Keybind {
+                    mode: "prefix".to_string(),
+                    key: "n".to_string(),
+                    command: vec!["next-window".to_string()],
                     raw: true,
                     context: false,
                     popup: false,
@@ -2666,6 +2689,30 @@ mod tests {
         assert_eq!(spec.url.as_deref(), Some("https://example.test/foo.git"));
         assert_eq!(spec.branch.as_deref(), Some("main"));
         assert_eq!(spec.path.as_deref(), Some("plugins/foo"));
+    }
+
+    #[test]
+    fn builtin_sensible_plugin_sets_defaults() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.use("sensible")
+                "#,
+            )
+            .unwrap();
+
+        let options = runtime.options();
+        assert!(options.contains(&("escape-time".to_string(), "0".to_string())));
+        assert!(options.contains(&("history-limit".to_string(), "50000".to_string())));
+        assert!(options.contains(&("display-time".to_string(), "4000".to_string())));
+        assert!(options.contains(&("status-interval".to_string(), "5".to_string())));
+        assert!(options.contains(&("focus-events".to_string(), "on".to_string())));
+        assert!(options.contains(&("status-keys".to_string(), "emacs".to_string())));
+        assert!(options.contains(&("aggressive-resize".to_string(), "on".to_string())));
+
+        assert!(runtime.keybinds().is_empty());
     }
 
     #[test]
@@ -3275,19 +3322,25 @@ mod tests {
                 r#"
                 local battery = tpane.widgets.battery({ every = "20s", timeout = "1s", cmd = "printf battery" })
                 local player = tpane.widgets.player({ every = "5s", timeout = "1s", cmd = "printf song" })
-                tpane.statusline { right = { battery, player } }
+                local cpu = tpane.widgets.cpu({ every = "2s", timeout = "1s", cmd = "printf cpu" })
+                local memory = tpane.widgets.memory({ every = "3s", timeout = "1s", cmd = "printf memory" })
+                tpane.statusline { right = { battery, player, cpu, memory } }
                 "#,
             )
             .unwrap();
 
         let jobs = runtime.jobs();
-        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs.len(), 4);
         assert_eq!(jobs[0].every, Duration::from_secs(20));
         assert_eq!(jobs[0].timeout, Duration::from_secs(1));
         assert_eq!(jobs[0].command, "printf battery");
         assert_eq!(jobs[1].every, Duration::from_secs(5));
         assert_eq!(jobs[1].timeout, Duration::from_secs(1));
         assert_eq!(jobs[1].command, "printf song");
+        assert_eq!(jobs[2].every, Duration::from_secs(2));
+        assert_eq!(jobs[2].command, "printf cpu");
+        assert_eq!(jobs[3].every, Duration::from_secs(3));
+        assert_eq!(jobs[3].command, "printf memory");
     }
 
     #[test]
