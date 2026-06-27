@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.2 - 2026-06-27
+
+### Features
+
+- add built-in `sensible` plugin
+- add `cpu(opts)` and `memory(opts)` widgets
+- add plugin documentation
+- allow statusline rows as top-level shorthand
+
+### Bug Fixes
+
+- apply statusline changes immediately on reload
+- clear stale statusline rows when switching between multiline and single-line configs
+
 ## 0.5.1 - 2026-06-27
 
 ### Features
