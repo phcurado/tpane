@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result};
 
 use crate::lua_runtime::{
-    JobDef, LuaRuntime, StatePresentation, config_lua_files, user_plugin_files,
+    JobDef, LuaRuntime, StatePresentation, StatusRender, config_lua_files, user_plugin_files,
 };
 use crate::process::{ProcessProvider, SystemProcessProvider};
 use crate::protocol::{PaneSnapshot, Request, Response};
@@ -25,6 +25,8 @@ use crate::tmux;
 const MAX_RUNTIME_ERRORS: usize = 50;
 const MAX_TMUX_LIVENESS_FAILURES: usize = 5;
 const SERVER_SENTINEL: &str = "@tpane_applied";
+const STATUSLINE_SENTINEL: &str = "@tpane_statusline";
+const MAX_STATUS_ROWS: usize = 5;
 
 #[derive(Debug, Clone)]
 struct StateRecord {
@@ -99,12 +101,9 @@ struct Daemon {
     runtime_errors: Vec<String>,
     states: HashMap<String, StateRecord>,
     status_strip: String,
-    status_left: String,
-    status_right: String,
     status_position: Option<String>,
     status_interval: Option<u64>,
-    status_rows: Option<usize>,
-    status_formats: HashMap<usize, String>,
+    status_render: Option<StatusRender>,
     options: HashMap<String, String>,
     job_data: Rc<RefCell<HashMap<String, String>>>,
     job_last_run: HashMap<String, Instant>,
@@ -139,12 +138,9 @@ impl Daemon {
             runtime_errors: Vec::new(),
             states: HashMap::new(),
             status_strip: String::new(),
-            status_left: String::new(),
-            status_right: String::new(),
             status_position: None,
             status_interval: None,
-            status_rows: None,
-            status_formats: HashMap::new(),
+            status_render: None,
             options: HashMap::new(),
             job_data,
             job_last_run: HashMap::new(),
@@ -166,8 +162,8 @@ impl Daemon {
                 Ok(count) => Response::ok(Some(format!("refreshed {count} panes"))),
                 Err(error) => Response::error(error),
             },
-            Request::Reload => match self.reload_plugins() {
-                Ok(()) => Response::ok(Some(self.reload_message())),
+            Request::Reload => match self.reload_plugins().and_then(|()| self.scan()) {
+                Ok(_) => Response::ok(Some(self.reload_message())),
                 Err(error) => Response::error(error),
             },
             Request::Status => {
@@ -331,12 +327,9 @@ impl Daemon {
         self.prev_windows.clear();
         self.prev_active = None;
         self.status_strip.clear();
-        self.status_left.clear();
-        self.status_right.clear();
         self.status_position = None;
         self.status_interval = None;
-        self.status_rows = None;
-        self.status_formats.clear();
+        self.status_render = None;
         self.options.clear();
         self.pane_borders.clear();
         self.pane_vars.clear();
@@ -587,7 +580,7 @@ impl Daemon {
 
         let status = self.lua.status_options();
         self.apply_status_position_interval(status.position, status.interval)?;
-        self.apply_status_rows(status.rows)
+        Ok(())
     }
 
     fn apply_status_position_interval(
@@ -614,73 +607,81 @@ impl Daemon {
         Ok(())
     }
 
-    fn apply_status_rows(&mut self, rows: Option<usize>) -> Result<()> {
-        if rows != self.status_rows {
-            if let Some(rows) = rows {
-                let value = if rows == 1 {
-                    "on".to_string()
-                } else {
-                    rows.to_string()
-                };
-                tmux::set_global_var("status", &value)?;
-                self.status_rows = Some(rows);
-            } else if self.status_rows.is_some() {
-                tmux::unset_global_var("status")?;
-                self.status_rows = None;
-            }
+    fn clear_statusline(&mut self) -> Result<()> {
+        for index in 0..MAX_STATUS_ROWS {
+            tmux::unset_global_var(&format!("status-format[{index}]"))?;
         }
+        tmux::unset_global_var("status")?;
+        tmux::unset_global_var("status-left")?;
+        tmux::unset_global_var("status-right")?;
+        tmux::unset_global_var(STATUSLINE_SENTINEL)?;
+        self.status_render = None;
         Ok(())
     }
 
-    fn update_status_formats(&mut self, formats: Vec<(usize, String)>) -> Result<()> {
-        let next = formats.into_iter().collect::<HashMap<_, _>>();
-        for index in self
-            .status_formats
-            .keys()
-            .filter(|index| !next.contains_key(*index))
-            .copied()
-            .collect::<Vec<_>>()
-        {
-            tmux::unset_global_var(&format!("status-format[{index}]"))?;
-            self.status_formats.remove(&index);
-        }
-        for (index, value) in next {
-            if self.status_formats.get(&index) != Some(&value) {
-                tmux::set_global_var(&format!("status-format[{index}]"), &value)?;
-                self.status_formats.insert(index, value);
+    fn apply_statusline(&mut self, status: &StatusRender) -> Result<()> {
+        self.apply_status_position_interval(status.position.clone(), status.interval)?;
+        if let Some(rows) = status.rows {
+            let value = if rows == 1 {
+                "on".to_string()
+            } else {
+                rows.to_string()
+            };
+            tmux::set_global_var("status", &value)?;
+            tmux::unset_global_var("status-left")?;
+            tmux::unset_global_var("status-right")?;
+            let formats = status.formats.iter().cloned().collect::<HashMap<_, _>>();
+            for index in 0..MAX_STATUS_ROWS {
+                if let Some(value) = formats.get(&index) {
+                    tmux::set_global_var(&format!("status-format[{index}]"), value)?;
+                } else {
+                    tmux::unset_global_var(&format!("status-format[{index}]"))?;
+                }
+            }
+        } else {
+            tmux::set_global_var("status", "on")?;
+            for index in 0..MAX_STATUS_ROWS {
+                tmux::unset_global_var(&format!("status-format[{index}]"))?;
+            }
+            if let Some(left) = &status.left {
+                tmux::set_status("left", left)?;
+            } else {
+                tmux::unset_global_var("status-left")?;
+            }
+            if let Some(right) = &status.right {
+                tmux::set_status("right", right)?;
+            } else {
+                tmux::unset_global_var("status-right")?;
             }
         }
+        tmux::set_global_var(STATUSLINE_SENTINEL, "1")?;
         Ok(())
+    }
+
+    fn tmux_statusline_owned(&self) -> bool {
+        tmux::get_global_var(STATUSLINE_SENTINEL).unwrap_or_default() == "1"
     }
 
     fn update_statusline(&mut self, current_pane_id: Option<&str>) -> Result<()> {
         let (status, errors) = self.lua.render_statusline(current_pane_id);
         self.record_runtime_errors(errors);
-        self.apply_status_position_interval(status.position, status.interval)?;
-        self.apply_status_rows(status.rows)?;
-        self.update_status_formats(status.formats)?;
-        match status.left {
-            Some(left) if left != self.status_left => {
-                tmux::set_status("left", &left)?;
-                self.status_left = left;
+
+        let owned = self.tmux_statusline_owned();
+        if !status.active {
+            if owned || self.status_render.is_some() {
+                self.clear_statusline()?;
+                tmux::refresh_status()?;
             }
-            None if !self.status_left.is_empty() => {
-                tmux::unset_global_var("status-left")?;
-                self.status_left.clear();
-            }
-            _ => {}
+            return Ok(());
         }
-        match status.right {
-            Some(right) if right != self.status_right => {
-                tmux::set_status("right", &right)?;
-                self.status_right = right;
-            }
-            None if !self.status_right.is_empty() => {
-                tmux::unset_global_var("status-right")?;
-                self.status_right.clear();
-            }
-            _ => {}
+
+        if self.status_render.as_ref() == Some(&status) && owned {
+            return Ok(());
         }
+
+        self.apply_statusline(&status)?;
+        self.status_render = Some(status);
+        tmux::refresh_status()?;
         Ok(())
     }
 
@@ -1235,12 +1236,9 @@ mod tests {
             runtime_errors: Vec::new(),
             states: HashMap::new(),
             status_strip: String::new(),
-            status_left: String::new(),
-            status_right: String::new(),
             status_position: None,
             status_interval: None,
-            status_rows: None,
-            status_formats: HashMap::new(),
+            status_render: None,
             options: HashMap::new(),
             job_data,
             job_last_run: HashMap::new(),
@@ -1307,12 +1305,17 @@ mod tests {
         daemon.prev_windows.insert("@1".to_string());
         daemon.prev_active = Some("%1".to_string());
         daemon.status_strip = "strip".to_string();
-        daemon.status_left = "left".to_string();
-        daemon.status_right = "right".to_string();
         daemon.status_position = Some("top".to_string());
         daemon.status_interval = Some(1);
-        daemon.status_rows = Some(2);
-        daemon.status_formats.insert(1, "extra".to_string());
+        daemon.status_render = Some(StatusRender {
+            active: true,
+            position: Some("top".to_string()),
+            interval: Some(1),
+            rows: Some(2),
+            left: None,
+            right: None,
+            formats: vec![(1, "extra".to_string())],
+        });
         daemon.options.insert("mouse".to_string(), "on".to_string());
         daemon
             .pane_borders
@@ -1328,12 +1331,9 @@ mod tests {
         assert!(daemon.prev_windows.is_empty());
         assert!(daemon.prev_active.is_none());
         assert!(daemon.status_strip.is_empty());
-        assert!(daemon.status_left.is_empty());
-        assert!(daemon.status_right.is_empty());
         assert!(daemon.status_position.is_none());
         assert!(daemon.status_interval.is_none());
-        assert!(daemon.status_rows.is_none());
-        assert!(daemon.status_formats.is_empty());
+        assert!(daemon.status_render.is_none());
         assert!(daemon.options.is_empty());
         assert!(daemon.pane_borders.is_empty());
         assert!(daemon.pane_vars.is_empty());

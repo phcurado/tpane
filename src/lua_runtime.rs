@@ -103,6 +103,7 @@ enum StatusItem {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StatusRender {
+    pub active: bool,
     pub position: Option<String>,
     pub interval: Option<u64>,
     pub rows: Option<usize>,
@@ -703,6 +704,7 @@ impl LuaRuntime {
             .borrow()
             .as_ref()
             .map(|def| StatusRender {
+                active: true,
                 position: def.position.clone(),
                 interval: def.interval,
                 rows: (!def.rows.is_empty()).then_some(def.rows.len()),
@@ -779,6 +781,7 @@ impl LuaRuntime {
 
             return (
                 StatusRender {
+                    active: true,
                     position: def.position,
                     interval: def.interval,
                     rows: Some(def.rows.len()),
@@ -799,6 +802,7 @@ impl LuaRuntime {
 
         (
             StatusRender {
+                active: true,
                 position: def.position,
                 interval: def.interval,
                 rows: None,
@@ -1049,7 +1053,12 @@ fn parse_statusline_def(table: Table) -> mlua::Result<StatusLineDef> {
     let separator = table
         .get::<Option<String>>("separator")?
         .unwrap_or_else(|| "  ".to_string());
-    let rows = parse_status_rows(table.get("rows")?, &separator)?;
+    let rows_value: Value = table.get("rows")?;
+    let rows = if matches!(rows_value, Value::Nil) && table.raw_len() > 0 {
+        parse_status_rows(Value::Table(table.clone()), &separator)?
+    } else {
+        parse_status_rows(rows_value, &separator)?
+    };
     let (left, right) = if rows.is_empty() {
         (
             parse_status_slot(table.get("left")?)?,
@@ -3336,6 +3345,39 @@ mod tests {
                     1,
                     "cwd  #{W:#{E:window-status-format} ,#{E:window-status-current-format} }#[align=right]#{?client_prefix,  ,  }".to_string()
                 )
+            ]
+        );
+    }
+
+    #[test]
+    fn statusline_accepts_implicit_top_level_rows() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                local session = tpane.widget(function() return "session" end)
+                local clock = tpane.widget(function() return "clock" end)
+                tpane.statusline {
+                  position = "top",
+                  interval = 1,
+                  { left = { session } },
+                  { right = { clock } },
+                }
+                "#,
+            )
+            .unwrap();
+
+        let (status, errors) = runtime.render_statusline(None);
+        assert!(errors.is_empty());
+        assert_eq!(status.position.as_deref(), Some("top"));
+        assert_eq!(status.interval, Some(1));
+        assert_eq!(status.rows, Some(2));
+        assert_eq!(
+            status.formats,
+            vec![
+                (0, "session".to_string()),
+                (1, "#[align=right]clock".to_string())
             ]
         );
     }

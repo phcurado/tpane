@@ -243,6 +243,10 @@ pub fn set_status_interval(interval: u64) -> Result<()> {
     tmux_owned(set_status_interval_args(interval)).map(|_| ())
 }
 
+pub fn refresh_status() -> Result<()> {
+    tmux(&["refresh-client", "-S"]).map(|_| ())
+}
+
 fn set_status_interval_args(interval: u64) -> Vec<String> {
     vec![
         "set-option".to_string(),
