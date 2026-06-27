@@ -23,6 +23,7 @@ run-shell -b 'tpane'
 Create `~/.config/tmux/tpane/init.lua`:
 
 ```lua
+tpane.use("sensible")
 tpane.use("themes")
 tpane.use("vim-navigator")
 tpane.use("yank")
@@ -30,7 +31,6 @@ tpane.use("yank")
 tpane.theme("Catppuccin Mocha")
 
 tpane.opt.mouse = true
-tpane.opt.history_limit = 5000
 tpane.opt.mode_keys = "vi"
 
 tpane.bind("h", tpane.pane.select("left"))
@@ -42,8 +42,8 @@ local battery = tpane.widgets.battery({ every = "30s" })
 
 tpane.statusline {
   position = "top",
-  left = { tpane.widgets.session },
-  right = { battery, tpane.widgets.clock },
+  left = { tpane.widgets.session, tpane.widgets.tabs },
+  right = { battery, tpane.widgets.clock, tpane.widgets.date, tpane.widgets.prefix },
 }
 ```
 
@@ -77,9 +77,6 @@ set -as terminal-features ",xterm-256color:RGB"
 
 set -g base-index 1
 set -g pane-base-index 1
-
-set -g status-position top
-set -g status-style bg=default
 
 unbind C-b
 set -g prefix C-a
@@ -152,10 +149,12 @@ tpane.bind("R", "source-file ~/.config/tmux/tmux.conf ; display 'reloaded'")
 ```lua
 tpane.statusline {
   position = "top",
-  left = { tpane.widgets.session },
+  left = { tpane.widgets.session, tpane.widgets.tabs },
   right = { tpane.widgets.host, tpane.widgets.clock },
 }
 ```
+
+`tpane.widgets.tabs` renders the tmux window list.
 
 Use rows for a multiline status bar:
 
