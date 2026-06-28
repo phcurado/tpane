@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.4 - 2026-06-28
+
+### Bug Fixes
+
+- reduce default spacing between statusline widgets
+- remove extra trailing space from the session widget
+
+### Documentation
+
+- add documentation site
+- add README logo, badges and docs links
+
 ## 0.5.3 - 2026-06-27
 
 ### Features

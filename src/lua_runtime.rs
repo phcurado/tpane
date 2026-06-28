@@ -1052,7 +1052,7 @@ fn parse_statusline_def(table: Table) -> mlua::Result<StatusLineDef> {
     }
     let separator = table
         .get::<Option<String>>("separator")?
-        .unwrap_or_else(|| "  ".to_string());
+        .unwrap_or_else(|| " ".to_string());
     let rows_value: Value = table.get("rows")?;
     let rows = if matches!(rows_value, Value::Nil) && table.raw_len() > 0 {
         parse_status_rows(Value::Table(table.clone()), &separator)?
@@ -3271,7 +3271,7 @@ mod tests {
 
         let (status, errors) = runtime.render_statusline(Some("%1"));
         assert!(errors.is_empty());
-        assert_eq!(status.left.as_deref(), Some("[#{client_session}] "));
+        assert_eq!(status.left.as_deref(), Some("[#{client_session}]"));
     }
 
     #[test]
@@ -3293,7 +3293,7 @@ mod tests {
         assert!(errors.is_empty());
         assert_eq!(
             status.left.as_deref(),
-            Some("#H  #{?client_prefix,  ,  }")
+            Some("#H #{?client_prefix,  ,  }")
         );
     }
 
@@ -3396,7 +3396,7 @@ mod tests {
                 (0, "session#[align=right]clock".to_string()),
                 (
                     1,
-                    "cwd  #{W:#{E:window-status-format} ,#{E:window-status-current-format} }#[align=right]#{?client_prefix,  ,  }".to_string()
+                    "cwd #{W:#{E:window-status-format} ,#{E:window-status-current-format} }#[align=right]#{?client_prefix,  ,  }".to_string()
                 )
             ]
         );

@@ -2,8 +2,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "cp ../CHANGELOG.md changelog.md",
     "dev": "vitepress dev --host 0.0.0.0",
+    "prebuild": "cp ../CHANGELOG.md changelog.md",
     "build": "vitepress build",
+    "prepreview": "cp ../CHANGELOG.md changelog.md",
     "preview": "vitepress preview"
   },
   "devDependencies": {

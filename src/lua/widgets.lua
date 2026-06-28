@@ -1,5 +1,5 @@
 tpane.widgets.session = tpane.widget(function()
-  return "[#{client_session}] "
+  return "[#{client_session}]"
 end)
 
 tpane.widgets.host = tpane.widget(function()
