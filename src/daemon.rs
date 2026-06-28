@@ -366,12 +366,11 @@ impl Daemon {
                     .or(pane.state.clone());
                 (detection.kind, detection.label, tag, state)
             } else {
-                (
-                    String::new(),
-                    String::new(),
-                    pane.tag.clone(),
-                    pane.state.clone(),
-                )
+                self.unset_pane_var(&pane.id, "@tpane_kind")?;
+                self.unset_pane_var(&pane.id, "@tpane_label")?;
+                self.unset_pane_var(&pane.id, "@tpane_color")?;
+                let tag = self.update_pane_tag(&pane, None)?;
+                (String::new(), String::new(), tag, pane.state.clone())
             };
             snapshots.push(PaneSnapshot {
                 id: pane.id.clone(),

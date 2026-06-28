@@ -2696,6 +2696,7 @@ mod tests {
         runtime
             .load_source("test.lua", r#"tpane.use("pane-detection")"#)
             .unwrap();
+        assert!(runtime.run_deferred().is_empty());
 
         let detected = runtime
             .detect(
@@ -2723,6 +2724,48 @@ mod tests {
 
         assert_eq!(detected.kind, "pane");
         assert_eq!(detected.label, "zsh");
+    }
+
+    #[test]
+    fn pane_detection_fallback_does_not_shadow_user_kinds() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.use("pane-detection")
+                tpane.kind { name = "pi", match = "pi", label = function() return "pi" end }
+                "#,
+            )
+            .unwrap();
+        assert!(runtime.run_deferred().is_empty());
+
+        let detected = runtime
+            .detect(
+                &PaneInfo {
+                    id: "%1".to_string(),
+                    pid: 1,
+                    cwd: "/tmp/work".to_string(),
+                    command: "pi".to_string(),
+                    session: "s".to_string(),
+                    window: "@1".to_string(),
+                    active: true,
+                    zoomed: false,
+                    tag: None,
+                    home: None,
+                    state: None,
+                },
+                vec![ProcessInfo {
+                    pid: 1,
+                    ppid: 0,
+                    argv: "pi".to_string(),
+                }],
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(detected.kind, "pi");
+        assert_eq!(detected.label, "pi");
     }
 
     #[test]
