@@ -612,6 +612,7 @@ impl Daemon {
             tmux::unset_global_var(&format!("status-format[{index}]"))?;
         }
         tmux::unset_global_var("status")?;
+        tmux::unset_global_var("status-format")?;
         tmux::unset_global_var("status-left")?;
         tmux::unset_global_var("status-right")?;
         tmux::unset_global_var(STATUSLINE_SENTINEL)?;
@@ -640,19 +641,15 @@ impl Daemon {
             }
         } else {
             tmux::set_global_var("status", "on")?;
-            for index in 0..MAX_STATUS_ROWS {
+            tmux::set_global_var(
+                "status-format[0]",
+                &status_format_row(status.left.as_deref(), status.right.as_deref()),
+            )?;
+            for index in 1..MAX_STATUS_ROWS {
                 tmux::unset_global_var(&format!("status-format[{index}]"))?;
             }
-            if let Some(left) = &status.left {
-                tmux::set_status("left", left)?;
-            } else {
-                tmux::unset_global_var("status-left")?;
-            }
-            if let Some(right) = &status.right {
-                tmux::set_status("right", right)?;
-            } else {
-                tmux::unset_global_var("status-right")?;
-            }
+            tmux::unset_global_var("status-left")?;
+            tmux::unset_global_var("status-right")?;
         }
         tmux::set_global_var(STATUSLINE_SENTINEL, "1")?;
         Ok(())
@@ -1034,6 +1031,15 @@ fn status_dot(
     };
     let glyph = presentation.glyph.unwrap_or_else(|| "●".to_string());
     format!("#[fg={color}]{glyph}#[default]")
+}
+
+fn status_format_row(left: Option<&str>, right: Option<&str>) -> String {
+    match (left, right) {
+        (Some(left), Some(right)) => format!("{left}#[align=right]{right}"),
+        (Some(left), None) => left.to_string(),
+        (None, Some(right)) => format!("#[align=right]{right}"),
+        (None, None) => String::new(),
+    }
 }
 
 fn current_status_pane_id(snapshots: &[PaneSnapshot]) -> Option<String> {

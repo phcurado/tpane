@@ -1,9 +1,10 @@
 # Changelog
 
-## 0.5.4 - 2026-06-28
+## 0.5.5 - 2026-06-28
 
 ### Bug Fixes
 
+- render single-line statuslines with `status-format[0]` so `tpane.widgets.tabs` is not truncated by `status-left-length`
 - reduce default spacing between statusline widgets
 - remove extra trailing space from the session widget
 
