@@ -2,9 +2,10 @@ import { defineConfig } from "vitepress";
 
 export default defineConfig({
   title: "tpane",
-  description: "Configure tmux with Lua",
+  description: "Lua-powered tmux config with plugins, themes, widgets, and pane helpers",
   base: "/tpane/",
   themeConfig: {
+    logo: "/logo.png",
     search: { provider: "local" },
     sidebar: [
       {
@@ -18,7 +19,7 @@ export default defineConfig({
           { text: "Reusable panes", link: "/reusable-panes" },
           { text: "Pane detection", link: "/pane-detection" },
           { text: "Lua API", link: "/lua-api" },
-          { text: "Changelog", link: "https://github.com/phcurado/tpane/blob/main/CHANGELOG.md" },
+          { text: "Changelog", link: "/changelog" },
         ],
       },
     ],

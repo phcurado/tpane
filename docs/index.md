@@ -1,11 +1,15 @@
 # tpane
 
+<p align="center">
+  <img src="/logo.png" alt="tpane logo" width="360">
+</p>
+
 tpane lets you write tmux configuration in Lua. It comes with plugins, themes,
 status bar widgets, and helpers for key bindings, panes, windows, and common tmux
 settings.
 
 The docs in this site match the current `main` branch. For release notes and
-version history, see the [changelog](https://github.com/phcurado/tpane/blob/main/CHANGELOG.md).
+version history, see the [changelog](changelog.md).
 
 ## Demo
 
@@ -21,6 +25,7 @@ version history, see the [changelog](https://github.com/phcurado/tpane/blob/main
 - [Reusable panes](reusable-panes.md): panes you can toggle without stopping their process.
 - [Pane detection](pane-detection.md): recognize panes by command, directory, output, or process tree.
 - [Lua API reference](lua-api.md): full API reference.
+- [Changelog](changelog.md): release notes and version history.
 
 If you already have tpane installed, `tpane status` shows config errors and
 `tpane reload` reloads your Lua config from inside tmux.

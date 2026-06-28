@@ -1,4 +1,24 @@
+<div align="center">
+
 # tpane
+
+<p><img title="tpane logo" src="docs/public/logo.png" width="360" alt="tpane logo"></p>
+
+**Lua-powered tmux config with plugins, themes, widgets and more 🌟**
+
+[![Release](https://img.shields.io/github/v/release/phcurado/tpane)](https://github.com/phcurado/tpane/releases)
+[![Release date](https://img.shields.io/github/release-date/phcurado/tpane)](https://github.com/phcurado/tpane/releases)
+[![Crates.io](https://img.shields.io/crates/v/tpane)](https://crates.io/crates/tpane)
+[![License](https://img.shields.io/github/license/phcurado/tpane)](LICENSE)
+
+**[Docs](https://phcurado.github.io/tpane/) &nbsp;&nbsp;•&nbsp;&nbsp;**
+**[Quick start](https://phcurado.github.io/tpane/quick-start) &nbsp;&nbsp;•&nbsp;&nbsp;**
+**[Install](https://phcurado.github.io/tpane/install) &nbsp;&nbsp;•&nbsp;&nbsp;**
+**[Changelog](CHANGELOG.md)**
+
+</div>
+
+## Introduction
 
 tpane lets you write tmux configuration in Lua. It comes with plugins, themes,
 status bar widgets, and helpers for key bindings, panes, windows, and common tmux
