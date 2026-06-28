@@ -18,6 +18,7 @@ export default defineConfig({
           { text: "Reusable panes", link: "/reusable-panes" },
           { text: "Pane detection", link: "/pane-detection" },
           { text: "Lua API", link: "/lua-api" },
+          { text: "Changelog", link: "https://github.com/phcurado/tpane/blob/main/CHANGELOG.md" },
         ],
       },
     ],

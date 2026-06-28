@@ -275,7 +275,7 @@ tpane plugin list
 tpane plugin remove NAME
 ```
 
-See [`docs/plugins.md`](docs/plugins.md) for details.
+See the [plugin docs](https://phcurado.github.io/tpane/plugins) for details.
 
 ## CLI
 
@@ -290,4 +290,4 @@ tpane themes      # list bundled themes
 tpane update      # update tpane
 ```
 
-More docs start at [`docs/index.md`](docs/index.md).
+Documentation: https://phcurado.github.io/tpane/
