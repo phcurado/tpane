@@ -1,18 +1,18 @@
 [package]
 name = "tpane"
 version = "0.5.4"
-edition = "2024"
-rust-version = "1.85"
 authors = ["Paulo Curado"]
+categories = ["command-line-utilities"]
+documentation = "https://phcurado.github.io/tpane/lua-api"
+edition = "2024"
+exclude = [".github/**"]
+homepage = "https://phcurado.github.io/tpane/"
+keywords = ["tmux", "lua", "terminal", "multiplexer"]
 license = "MIT"
-description = "Configure tmux with Lua."
 readme = "README.md"
 repository = "https://github.com/phcurado/tpane"
-homepage = "https://phcurado.github.io/tpane/"
-documentation = "https://phcurado.github.io/tpane/lua-api"
-keywords = ["tmux", "lua", "terminal", "multiplexer"]
-categories = ["command-line-utilities"]
-exclude = [".github/**"]
+rust-version = "1.85"
+description = "Configure tmux with Lua."
 
 [dependencies]
 anyhow = "1.0"

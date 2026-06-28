@@ -3291,10 +3291,7 @@ mod tests {
 
         let (status, errors) = runtime.render_statusline(Some("%1"));
         assert!(errors.is_empty());
-        assert_eq!(
-            status.left.as_deref(),
-            Some("#H #{?client_prefix,  ,  }")
-        );
+        assert_eq!(status.left.as_deref(), Some("#H #{?client_prefix,  ,  }"));
     }
 
     #[test]
