@@ -8,7 +8,7 @@ curl -fsSL https://raw.githubusercontent.com/phcurado/tpane/main/install.sh | sh
 
 Add tpane at the end of `~/.config/tmux/tmux.conf`:
 
-```tmux
+```text
 run-shell -b 'tpane'
 ```
 

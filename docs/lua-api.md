@@ -6,7 +6,7 @@ bar config, plugins, pane helpers, or small bits of behavior into Lua.
 
 A minimal setup looks like this:
 
-```tmux
+```text
 # ~/.config/tmux/tmux.conf
 run-shell -b 'tpane'
 ```

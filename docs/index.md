@@ -1,4 +1,6 @@
-# tpane docs
+# tpane
+
+Configure tmux with Lua.
 
 - [Quick start](quick-start.md)
 - [Install](install.md)
