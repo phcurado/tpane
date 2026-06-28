@@ -27,6 +27,7 @@ const MAX_TMUX_LIVENESS_FAILURES: usize = 5;
 const SERVER_SENTINEL: &str = "@tpane_applied";
 const STATUSLINE_SENTINEL: &str = "@tpane_statusline";
 const MAX_STATUS_ROWS: usize = 5;
+const INITIAL_JOB_RETRY_SECS: u64 = 5;
 
 #[derive(Debug, Clone)]
 struct StateRecord {
@@ -426,16 +427,22 @@ impl Daemon {
         self.job_last_run.retain(|name, _| names.contains(name));
         self.job_running.retain(|name| names.contains(name));
 
+        let data_names = self
+            .job_data
+            .borrow()
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
         let now = Instant::now();
         for source in jobs {
             if self.job_running.contains(&source.name) {
                 continue;
             }
-            let due = self
+            let elapsed = self
                 .job_last_run
                 .get(&source.name)
-                .is_none_or(|last| now.duration_since(*last) >= source.every);
-            if due {
+                .map(|last| now.duration_since(*last));
+            if job_due(elapsed, source.every, data_names.contains(&source.name)) {
                 self.start_job(source, now);
             }
         }
@@ -1133,6 +1140,18 @@ fn handle_stream(mut stream: UnixStream, daemon: &mut Daemon) -> Result<()> {
     Ok(())
 }
 
+fn job_due(elapsed: Option<Duration>, every: Duration, has_data: bool) -> bool {
+    let Some(elapsed) = elapsed else {
+        return true;
+    };
+    let interval = if has_data {
+        every
+    } else {
+        every.min(Duration::from_secs(INITIAL_JOB_RETRY_SECS))
+    };
+    elapsed >= interval
+}
+
 fn run_job_command(command: &str, timeout: Duration) -> std::result::Result<String, String> {
     let mut child = Command::new("sh")
         .arg("-c")
@@ -1410,6 +1429,26 @@ mod tests {
         ));
         assert!(should_exit_after_liveness_failure(
             MAX_TMUX_LIVENESS_FAILURES
+        ));
+    }
+
+    #[test]
+    fn job_without_data_retries_before_full_interval() {
+        assert!(job_due(None, Duration::from_secs(300), false));
+        assert!(!job_due(
+            Some(Duration::from_secs(4)),
+            Duration::from_secs(300),
+            false
+        ));
+        assert!(job_due(
+            Some(Duration::from_secs(5)),
+            Duration::from_secs(300),
+            false
+        ));
+        assert!(!job_due(
+            Some(Duration::from_secs(5)),
+            Duration::from_secs(300),
+            true
         ));
     }
 

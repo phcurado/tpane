@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.6 - 2026-06-28
+
+### Bug Fixes
+
+- make job-backed widgets retry quickly on startup until they render a first value
+
 ## 0.5.5 - 2026-06-28
 
 ### Bug Fixes
