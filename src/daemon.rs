@@ -273,11 +273,6 @@ impl Daemon {
             }
         }
 
-        if let Err(error) = rt.load_builtins() {
-            self.load_errors = vec![format!("builtin-kinds.lua: {error}")];
-            self.surface_load_errors();
-            return Err(error);
-        }
         errors.extend(rt.run_deferred());
 
         for unbind in rt.unbinds() {
@@ -352,7 +347,8 @@ impl Daemon {
 
         for pane in panes {
             let proc_tree = table.tree(pane.pid);
-            if let Some(detection) = self.lua.detect(&pane, proc_tree.clone())? {
+            let detection = self.lua.detect(&pane, proc_tree.clone())?;
+            let (kind, label, tag, state) = if let Some(detection) = detection {
                 self.set_pane_var(&pane.id, "@tpane_kind", &detection.kind)?;
                 self.set_pane_var(&pane.id, "@tpane_label", &detection.label)?;
                 if let Some(color) = &detection.color {
@@ -368,24 +364,32 @@ impl Daemon {
                     .transpose()?
                     .flatten()
                     .or(pane.state.clone());
-                snapshots.push(PaneSnapshot {
-                    id: pane.id.clone(),
-                    pid: pane.pid,
-                    kind: detection.kind,
-                    label: detection.label,
-                    cwd: pane.cwd.clone(),
-                    cwd_basename: basename(&pane.cwd),
-                    command: pane.command.clone(),
-                    session: pane.session.clone(),
-                    window: pane.window.clone(),
-                    active: pane.active,
-                    zoomed: pane.zoomed,
-                    tag,
-                    home: pane.home.clone(),
-                    state,
-                    processes: proc_tree,
-                });
-            }
+                (detection.kind, detection.label, tag, state)
+            } else {
+                (
+                    String::new(),
+                    String::new(),
+                    pane.tag.clone(),
+                    pane.state.clone(),
+                )
+            };
+            snapshots.push(PaneSnapshot {
+                id: pane.id.clone(),
+                pid: pane.pid,
+                kind,
+                label,
+                cwd: pane.cwd.clone(),
+                cwd_basename: basename(&pane.cwd),
+                command: pane.command.clone(),
+                session: pane.session.clone(),
+                window: pane.window.clone(),
+                active: pane.active,
+                zoomed: pane.zoomed,
+                tag,
+                home: pane.home.clone(),
+                state,
+                processes: proc_tree,
+            });
         }
 
         let current_pane_id = current_status_pane_id(&snapshots);

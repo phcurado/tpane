@@ -146,15 +146,6 @@ function tpane.tabline(opts)
   }
 end
 
-tpane.options {
-  pane = {
-    border = {
-      status = "top",
-      format = "#{@tpane_border}",
-    },
-  },
-}
-
 tpane.state("approval", { color = "yellow", glyph = "" })
 tpane.state("blocked", { color = "red", glyph = "" })
 tpane.state("working", { color = "yellow", glyph = "" })
@@ -171,17 +162,6 @@ local function state_segment(state, fallback_glyph)
   if not presentation.color then return nil end
   return { text = presentation.glyph or fallback_glyph or "●", fg = presentation.color }
 end
-
-tpane.pane_border(function(pane)
-  local parts = {}
-  local state = state_segment(pane.state, "●")
-  if state then
-    state.text = state.text .. " "
-    parts[#parts + 1] = state
-  end
-  parts[#parts + 1] = { text = pane.label or pane.command or "", fg = "yellow" }
-  return parts
-end)
 
 function tpane.register_pane(name, opts)
   opts.tag = opts.tag or name

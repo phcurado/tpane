@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.7 - 2026-06-28
+
+### Features
+
+- add `pane-detection` built-in plugin for optional pane labels and border titles
+
+### Bug Fixes
+
+- keep pane context available when no pane detection plugin is loaded
+
 ## 0.5.6 - 2026-06-28
 
 ### Bug Fixes

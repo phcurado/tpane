@@ -297,7 +297,10 @@ fn builtin_plugin_status(status: &plugins::PluginStatus) -> bool {
 }
 
 fn builtin_plugin_name(name: &str) -> bool {
-    matches!(name, "vim-navigator" | "yank" | "themes")
+    matches!(
+        name,
+        "vim-navigator" | "yank" | "themes" | "sensible" | "pane-detection"
+    )
 }
 
 fn git_plugin_status_line(status: &plugins::PluginStatus) -> String {

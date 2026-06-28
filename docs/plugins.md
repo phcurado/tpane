@@ -7,6 +7,7 @@ tpane.use("sensible")
 tpane.use("vim-navigator")
 tpane.use("yank")
 tpane.use("themes")
+tpane.use("pane-detection")
 ```
 
 ## Built-in plugins
@@ -64,6 +65,14 @@ List themes:
 
 ```sh
 tpane themes
+```
+
+### pane-detection
+
+Basic pane labels and pane border titles by command.
+
+```lua
+tpane.use("pane-detection")
 ```
 
 ## Git plugins

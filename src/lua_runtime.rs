@@ -655,11 +655,6 @@ impl LuaRuntime {
             .map_err(|error| anyhow!("failed to load Lua prelude: {error}"))
     }
 
-    pub fn load_builtins(&self) -> Result<()> {
-        self.load_source("builtin-kinds.lua", BUILTIN_KINDS)
-            .map_err(|error| anyhow!("failed to load built-in Lua kinds: {error}"))
-    }
-
     pub fn keybinds(&self) -> Vec<Keybind> {
         self.keybinds.borrow().clone()
     }
@@ -1765,6 +1760,10 @@ fn load_plugin(lua: &Lua, name: &str, spec: &PluginSpec) -> mlua::Result<()> {
                 .set_name("builtin/plugins/themes/init.lua")
                 .exec()
         }
+        "pane-detection" => lua
+            .load(BUILTIN_PLUGIN_PANE_DETECTION)
+            .set_name("builtin/plugins/pane-detection/init.lua")
+            .exec(),
         _ => Err(mlua::Error::RuntimeError(format!("unknown plugin: {name}"))),
     }
 }
@@ -2407,7 +2406,7 @@ const BUILTIN_PLUGIN_SENSIBLE: &str = include_str!("../plugins/sensible/init.lua
 const BUILTIN_PLUGIN_THEMES: &str = include_str!("../plugins/themes/init.lua");
 const BUILTIN_PLUGIN_THEMES_DATA: &str = include_str!("../plugins/themes/palettes.tsv");
 
-const BUILTIN_KINDS: &str = include_str!("lua/builtin_kinds.lua");
+const BUILTIN_PLUGIN_PANE_DETECTION: &str = include_str!("../plugins/pane-detection/init.lua");
 
 #[cfg(test)]
 mod tests {
@@ -2689,6 +2688,41 @@ mod tests {
         assert_eq!(spec.url.as_deref(), Some("https://example.test/foo.git"));
         assert_eq!(spec.branch.as_deref(), Some("main"));
         assert_eq!(spec.path.as_deref(), Some("plugins/foo"));
+    }
+
+    #[test]
+    fn builtin_pane_detection_plugin_labels_by_command() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source("test.lua", r#"tpane.use("pane-detection")"#)
+            .unwrap();
+
+        let detected = runtime
+            .detect(
+                &PaneInfo {
+                    id: "%1".to_string(),
+                    pid: 1,
+                    cwd: "/tmp/work".to_string(),
+                    command: "zsh".to_string(),
+                    session: "s".to_string(),
+                    window: "@1".to_string(),
+                    active: true,
+                    zoomed: false,
+                    tag: None,
+                    home: None,
+                    state: None,
+                },
+                vec![ProcessInfo {
+                    pid: 1,
+                    ppid: 0,
+                    argv: "zsh".to_string(),
+                }],
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(detected.kind, "pane");
+        assert_eq!(detected.label, "zsh");
     }
 
     #[test]
@@ -3122,12 +3156,7 @@ mod tests {
                     "pane-active-border-style".to_string(),
                     "fg=#8caaee".to_string()
                 ),
-                (
-                    "pane-border-format".to_string(),
-                    "#{@tpane_border}".to_string()
-                ),
                 ("pane-border-lines".to_string(), "heavy".to_string()),
-                ("pane-border-status".to_string(), "top".to_string()),
                 ("pane-border-style".to_string(), "fg=#51576d".to_string()),
                 ("status-left-length".to_string(), "120".to_string()),
                 (
@@ -3219,6 +3248,9 @@ mod tests {
     #[test]
     fn pane_border_renders_from_lua_and_state_registry() {
         let (runtime, _) = runtime();
+        runtime
+            .load_source("test.lua", r#"tpane.use("pane-detection")"#)
+            .unwrap();
         let mut pane = pane("%1");
         pane.state = Some("working".to_string());
         pane.label = "build".to_string();
@@ -3228,6 +3260,19 @@ mod tests {
             border,
             "#[fg=yellow] #[default]#[fg=yellow]build#[default]"
         );
+    }
+
+    #[test]
+    fn pane_detection_border_renders_without_state() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source("test.lua", r#"tpane.use("pane-detection")"#)
+            .unwrap();
+        let mut pane = pane("%1");
+        pane.label = "zsh".to_string();
+
+        let border = runtime.render_pane_border(&pane).unwrap().unwrap();
+        assert_eq!(border, "#[fg=yellow]zsh#[default]");
     }
 
     #[test]

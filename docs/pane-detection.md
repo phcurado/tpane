@@ -3,6 +3,15 @@
 Pane detection lets tpane recognize panes by command, directory, output, or
 process tree.
 
+Nothing is detected unless you add kind rules yourself or load the built-in pane
+detection plugin:
+
+```lua
+tpane.use("pane-detection")
+```
+
+The built-in plugin also enables pane border titles.
+
 ## Kinds
 
 This marks panes running `psql` as database panes:

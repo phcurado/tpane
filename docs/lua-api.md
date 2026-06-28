@@ -386,6 +386,7 @@ tpane.use("sensible")
 tpane.use("vim-navigator")
 tpane.use("yank")
 tpane.use("themes")
+tpane.use("pane-detection")
 ```
 
 External plugins use the same function with a repo spec:
