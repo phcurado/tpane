@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.8 - 2026-06-29
+
+### Features
+
+- add `open-url` built-in plugin to open the URL under the cursor
+
 ## 0.5.7 - 2026-06-28
 
 ### Features

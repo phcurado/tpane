@@ -52,6 +52,16 @@ Copy-mode bindings for yanking selected text and pane paths.
 tpane.use("yank")
 ```
 
+### open-url
+
+Open the URL under the cursor without selecting it first.
+
+```lua
+tpane.use("open-url")
+```
+
+Binds `<prefix> o` in normal mode and `C-o` in copy mode. Supports `https://`, `http://`, `www.`, common bare domains and `localhost` URLs.
+
 ### themes
 
 Bundled themes from the iTerm2 Color Schemes collection.

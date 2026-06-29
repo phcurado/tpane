@@ -299,7 +299,7 @@ fn builtin_plugin_status(status: &plugins::PluginStatus) -> bool {
 fn builtin_plugin_name(name: &str) -> bool {
     matches!(
         name,
-        "vim-navigator" | "yank" | "themes" | "sensible" | "pane-detection"
+        "vim-navigator" | "yank" | "themes" | "sensible" | "pane-detection" | "open-url"
     )
 }
 
@@ -668,6 +668,12 @@ fn run_control_row(row: &ControlRow, expand: bool) -> Result<()> {
 }
 
 fn run_control_command(command: &[String]) -> Result<()> {
+    if command == ["reload"] {
+        return print_response(request(Request::Reload)?);
+    }
+    if command == ["refresh"] {
+        return print_response(request(Request::Refresh)?);
+    }
     let Some((name, args)) = command.split_first() else {
         return Ok(());
     };

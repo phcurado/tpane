@@ -1,6 +1,6 @@
 [package]
 name = "tpane"
-version = "0.5.7"
+version = "0.5.8"
 authors = ["Paulo Curado"]
 categories = ["command-line-utilities"]
 documentation = "https://phcurado.github.io/tpane/lua-api"

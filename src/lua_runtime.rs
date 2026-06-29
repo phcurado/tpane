@@ -58,6 +58,7 @@ pub struct Keybind {
     pub raw: bool,
     pub context: bool,
     pub popup: bool,
+    pub desc: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -501,6 +502,24 @@ impl LuaRuntime {
             })
             .map_err(lua_err)?;
         tpane.set("unbind", unbind).map_err(lua_err)?;
+
+        let keybinds_ref = Rc::clone(&self.keybinds);
+        let keybinds_fn = self
+            .lua
+            .create_function(move |lua, ()| {
+                let table = lua.create_table()?;
+                for (idx, keybind) in keybinds_ref.borrow().iter().enumerate() {
+                    let item = lua.create_table()?;
+                    item.set("mode", keybind.mode.clone())?;
+                    item.set("key", keybind.key.clone())?;
+                    item.set("desc", keybind.desc.clone())?;
+                    item.set("popup", keybind.popup)?;
+                    table.set(idx + 1, item)?;
+                }
+                Ok(table)
+            })
+            .map_err(lua_err)?;
+        tpane.set("keybinds", keybinds_fn).map_err(lua_err)?;
 
         let panels = Rc::clone(&self.panels);
         let panel = self
@@ -1348,6 +1367,9 @@ fn parse_panel_cards(cards: Table) -> mlua::Result<Vec<PanelCard>> {
 fn parse_optional_command(value: Value) -> mlua::Result<Option<Vec<String>>> {
     match value {
         Value::Nil => Ok(None),
+        Value::Table(table) if table.get::<Option<String>>("__tpane_action")?.is_some() => {
+            parse_action_table(table).map(|command| Some(command.command))
+        }
         other => parse_keybind_command(other).map(Some),
     }
 }
@@ -1371,6 +1393,7 @@ fn parse_bind(
                 command: command.command,
                 context: command.context.unwrap_or(true),
                 popup: false,
+                desc: None,
             })
         }
         [key, command, opts] => {
@@ -1384,6 +1407,7 @@ fn parse_bind(
                 command: command.command,
                 context: command.context.unwrap_or(opts.context),
                 popup: opts.popup,
+                desc: opts.desc,
             })
         }
         _ => Err(mlua::Error::RuntimeError(
@@ -1484,6 +1508,7 @@ struct KeybindOpts {
     mode: String,
     context: bool,
     popup: bool,
+    desc: Option<String>,
 }
 
 fn parse_keybind_opts(value: &Value, default_context: bool) -> mlua::Result<KeybindOpts> {
@@ -1495,7 +1520,7 @@ fn parse_keybind_opts(value: &Value, default_context: bool) -> mlua::Result<Keyb
                 .map(|pair| pair.map(|(key, _)| key))
             {
                 match key?.as_str() {
-                    "popup" | "context" | "prefix" | "table" | "mode" => {}
+                    "popup" | "context" | "prefix" | "table" | "mode" | "desc" => {}
                     other => {
                         return Err(mlua::Error::RuntimeError(format!(
                             "unknown bind option: {other}"
@@ -1525,12 +1550,14 @@ fn parse_keybind_opts(value: &Value, default_context: bool) -> mlua::Result<Keyb
                 mode,
                 context,
                 popup,
+                desc: table.get("desc")?,
             })
         }
         Value::Nil => Ok(KeybindOpts {
             mode: "prefix".to_string(),
             context: default_context,
             popup: false,
+            desc: None,
         }),
         other => Err(mlua::Error::RuntimeError(format!(
             "expected keybind opts table, got {other:?}"
@@ -1763,6 +1790,10 @@ fn load_plugin(lua: &Lua, name: &str, spec: &PluginSpec) -> mlua::Result<()> {
         "pane-detection" => lua
             .load(BUILTIN_PLUGIN_PANE_DETECTION)
             .set_name("builtin/plugins/pane-detection/init.lua")
+            .exec(),
+        "open-url" => lua
+            .load(BUILTIN_PLUGIN_OPEN_URL)
+            .set_name("builtin/plugins/open-url/init.lua")
             .exec(),
         _ => Err(mlua::Error::RuntimeError(format!("unknown plugin: {name}"))),
     }
@@ -2407,6 +2438,7 @@ const BUILTIN_PLUGIN_THEMES: &str = include_str!("../plugins/themes/init.lua");
 const BUILTIN_PLUGIN_THEMES_DATA: &str = include_str!("../plugins/themes/palettes.tsv");
 
 const BUILTIN_PLUGIN_PANE_DETECTION: &str = include_str!("../plugins/pane-detection/init.lua");
+const BUILTIN_PLUGIN_OPEN_URL: &str = include_str!("../plugins/open-url/init.lua");
 
 #[cfg(test)]
 mod tests {
@@ -2562,6 +2594,7 @@ mod tests {
                     raw: false,
                     context: true,
                     popup: false,
+                    desc: None,
                 },
                 Keybind {
                     mode: "prefix".to_string(),
@@ -2570,6 +2603,7 @@ mod tests {
                     raw: false,
                     context: true,
                     popup: false,
+                    desc: None,
                 },
                 Keybind {
                     mode: "root".to_string(),
@@ -2578,6 +2612,7 @@ mod tests {
                     raw: true,
                     context: false,
                     popup: false,
+                    desc: None,
                 },
                 Keybind {
                     mode: "prefix".to_string(),
@@ -2586,6 +2621,7 @@ mod tests {
                     raw: true,
                     context: false,
                     popup: false,
+                    desc: None,
                 },
                 Keybind {
                     mode: "root".to_string(),
@@ -2594,6 +2630,7 @@ mod tests {
                     raw: true,
                     context: false,
                     popup: false,
+                    desc: None,
                 },
                 Keybind {
                     mode: "prefix".to_string(),
@@ -2602,6 +2639,7 @@ mod tests {
                     raw: true,
                     context: false,
                     popup: false,
+                    desc: None,
                 },
                 Keybind {
                     mode: "prefix".to_string(),
@@ -2610,6 +2648,7 @@ mod tests {
                     raw: true,
                     context: false,
                     popup: false,
+                    desc: None,
                 },
             ]
         );
@@ -2688,6 +2727,27 @@ mod tests {
         assert_eq!(spec.url.as_deref(), Some("https://example.test/foo.git"));
         assert_eq!(spec.branch.as_deref(), Some("main"));
         assert_eq!(spec.path.as_deref(), Some("plugins/foo"));
+    }
+
+    #[test]
+    fn builtin_open_url_plugin_binds_prefix_o() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source("test.lua", r#"tpane.use("open-url")"#)
+            .unwrap();
+
+        let keybind = &runtime.keybinds()[0];
+        assert_eq!(keybind.mode, "prefix");
+        assert_eq!(keybind.key, "o");
+        assert_eq!(keybind.command, ["__tpane_key_1"]);
+        assert!(!keybind.raw);
+        assert_eq!(keybind.desc.as_deref(), Some("Open URL under cursor"));
+
+        let copy_keybind = &runtime.keybinds()[1];
+        assert_eq!(copy_keybind.mode, "copy-mode-vi");
+        assert_eq!(copy_keybind.key, "C-o");
+        assert_eq!(copy_keybind.command, ["__tpane_key_2"]);
+        assert!(!copy_keybind.raw);
     }
 
     #[test]
@@ -3122,16 +3182,15 @@ mod tests {
     }
 
     #[test]
-    fn bind_rejects_unknown_options() {
+    fn bind_records_descriptions() {
         let (runtime, _) = runtime();
-        let error = runtime
+        runtime
             .load_source(
                 "test.lua",
-                r#"tpane.bind("a", tpane.run("pi"), { desc = "unused" })"#,
+                r#"tpane.bind("a", tpane.run("pi"), { desc = "Toggle Pi" })"#,
             )
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("unknown bind option: desc"));
+            .unwrap();
+        assert_eq!(runtime.keybinds()[0].desc.as_deref(), Some("Toggle Pi"));
     }
 
     #[test]
