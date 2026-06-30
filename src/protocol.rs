@@ -6,6 +6,8 @@ use crate::process::ProcessInfo;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     Ping,
+    Info,
+    Shutdown,
     Refresh,
     Reload,
     Status,
@@ -42,6 +44,12 @@ pub struct PanelView {
     pub id: String,
     pub title: String,
     pub cards: Vec<PanelCard>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DaemonInfo {
+    pub version: String,
+    pub exe_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

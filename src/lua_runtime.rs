@@ -1795,6 +1795,10 @@ fn load_plugin(lua: &Lua, name: &str, spec: &PluginSpec) -> mlua::Result<()> {
             .load(BUILTIN_PLUGIN_OPEN_URL)
             .set_name("builtin/plugins/open-url/init.lua")
             .exec(),
+        "agents" => lua
+            .load(BUILTIN_PLUGIN_AGENTS)
+            .set_name("builtin/plugins/agents/init.lua")
+            .exec(),
         _ => Err(mlua::Error::RuntimeError(format!("unknown plugin: {name}"))),
     }
 }
@@ -2122,6 +2126,18 @@ fn tmux_api(lua: &Lua) -> Result<Table> {
         .map_err(lua_err)?;
     table
         .set(
+            "set_window_var",
+            lua.create_function(|_, opts: Table| {
+                let target: String = opts.get("target")?;
+                let name: String = opts.get("name")?;
+                let value: String = opts.get("value")?;
+                tmux::set_window_var(&target, &name, &value).map_err(mlua_external)
+            })
+            .map_err(lua_err)?,
+        )
+        .map_err(lua_err)?;
+    table
+        .set(
             "split",
             lua.create_function(|_, opts: Table| {
                 let target: String = opts.get("target")?;
@@ -2439,6 +2455,7 @@ const BUILTIN_PLUGIN_THEMES_DATA: &str = include_str!("../plugins/themes/palette
 
 const BUILTIN_PLUGIN_PANE_DETECTION: &str = include_str!("../plugins/pane-detection/init.lua");
 const BUILTIN_PLUGIN_OPEN_URL: &str = include_str!("../plugins/open-url/init.lua");
+const BUILTIN_PLUGIN_AGENTS: &str = include_str!("../plugins/agents/init.lua");
 
 #[cfg(test)]
 mod tests {
@@ -2748,6 +2765,117 @@ mod tests {
         assert_eq!(copy_keybind.key, "C-o");
         assert_eq!(copy_keybind.command, ["__tpane_key_2"]);
         assert!(!copy_keybind.raw);
+    }
+
+    #[test]
+    fn builtin_agents_plugin_adds_tab_indicators() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.use("agents")
+                tpane.tabline({ label = "cwd" })
+                "#,
+            )
+            .unwrap();
+
+        let options = runtime.options();
+        assert!(options.iter().any(|(name, value)| {
+            name == "window-status-format"
+                && value.contains("#{@tpane_agent_tab_style}#I:#(pwd=")
+                && value.contains("#{@tpane_agent_indicator}")
+        }));
+    }
+
+    #[test]
+    fn tabline_supports_prefix_and_suffix() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r##"
+                tpane.tabline({
+                  label = "name",
+                  prefix = "#{@before}",
+                  suffix = "#{@after}",
+                  inactive = { fg = "#777777" },
+                  current = { fg = "#c6d0f5", bold = true },
+                })
+                "##,
+            )
+            .unwrap();
+
+        let options = runtime.options();
+        assert!(options.iter().any(|(name, value)| {
+            name == "window-status-format"
+                && value == "#[fg=#777777]#{@before}#I:#W#{@after}#[default]"
+        }));
+        assert!(options.iter().any(|(name, value)| {
+            name == "window-status-current-format"
+                && value == "#[fg=#c6d0f5,bold]#{@before}#I:#W#{@after}#[default]"
+        }));
+    }
+
+    #[test]
+    fn builtin_agents_tab_state_uses_background_only_for_blocked() {
+        let (runtime, _) = runtime();
+        runtime
+            .load_source(
+                "test.lua",
+                r##"
+                tpane.use("agents")
+                tpane.command(function()
+                  local blocked = tpane.agents._tab_state("blocked", 1)
+                  local working = tpane.agents._tab_state("working", 1)
+                  local idle = tpane.agents._tab_state("idle", 1)
+                  return blocked.style .. "|" .. blocked.indicator .. ";"
+                    .. working.style .. "|" .. working.indicator .. ";"
+                    .. idle.style .. "|" .. idle.indicator
+                end)
+                "##,
+            )
+            .unwrap();
+
+        let out = runtime.run_command("__tpane_command_1", &[]).unwrap();
+        assert_eq!(
+            out.as_deref(),
+            Some("#[fg=#11111b,bg=#f38ba8]|  ;|#[fg=#f9e2af]  ;|#[fg=#6c7086] 󰒲 ")
+        );
+    }
+
+    #[test]
+    fn builtin_agents_widget_renders_agent_notifications() {
+        let (runtime, panes) = runtime();
+        let mut claude = pane("%1");
+        claude.command = "claude".to_string();
+        claude.label = "claude".to_string();
+        claude.tag = Some("agent".to_string());
+        claude.state = Some("done_unseen".to_string());
+        claude.processes = vec![ProcessInfo {
+            pid: 123,
+            ppid: 1,
+            argv: "claude".to_string(),
+        }];
+        panes.borrow_mut().push(claude);
+
+        runtime
+            .load_source(
+                "test.lua",
+                r#"
+                tpane.use("agents")
+                local agents = tpane.widgets.agents({ context = false })
+                tpane.statusline { right = { agents } }
+                "#,
+            )
+            .unwrap();
+
+        let (status, errors) = runtime.render_statusline(None);
+        assert!(errors.is_empty());
+        assert_eq!(
+            status.right.as_deref(),
+            Some("#[fg=#a6e3a1] claude#[default]")
+        );
     }
 
     #[test]

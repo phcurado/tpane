@@ -276,6 +276,10 @@ pub fn get_pane_var(pane_id: &str, name: &str) -> Result<Option<String>> {
     }
 }
 
+pub fn set_window_var(window_id: &str, name: &str, value: &str) -> Result<()> {
+    tmux(&["set-option", "-w", "-t", window_id, name, value]).map(|_| ())
+}
+
 pub fn select_pane(pane_id: &str) -> Result<()> {
     tmux(&["select-window", "-t", pane_id])?;
     tmux(&["select-pane", "-t", pane_id]).map(|_| ())

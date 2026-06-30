@@ -136,6 +136,7 @@ function tpane.tabline(opts)
   end
   local text = label_format
   if opts.index ~= false then text = "#I:" .. text end
+  text = (opts.prefix or "") .. text .. (opts.suffix or "")
   tpane.options {
     window = {
       status = {

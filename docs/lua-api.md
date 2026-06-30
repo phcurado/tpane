@@ -372,6 +372,8 @@ Use `tpane.tabline` to configure tmux window tabs:
 ```lua
 tpane.tabline {
   label = "cwd", -- cwd, name, or a raw tmux format string
+  prefix = "",
+  suffix = "",
   inactive = { fg = "#777777" },
   current = { fg = "#8caaee", bold = true },
 }

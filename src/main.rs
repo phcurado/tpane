@@ -1,4 +1,5 @@
 mod daemon;
+mod exe_identity;
 mod lua_runtime;
 mod plugins;
 mod process;
@@ -27,7 +28,7 @@ use crossterm::{
     execute,
     terminal::{self, ClearType},
 };
-use protocol::{PaneSnapshot, PanelView, Request, Response};
+use protocol::{DaemonInfo, PaneSnapshot, PanelView, Request, Response};
 
 #[derive(Debug, Parser)]
 #[command(name = "tpane", version)]
@@ -160,14 +161,23 @@ fn launch() -> Result<()> {
 
 fn ensure_daemon() -> Result<()> {
     let socket = socket_path()?;
+    ensure_current_daemon(&socket)?;
+    reload_at(&socket)
+}
+
+fn ensure_current_daemon(socket: &PathBuf) -> Result<()> {
     if socket.exists() {
-        match reload_at(&socket) {
-            Ok(()) => return Ok(()),
-            Err(_) => {
-                fs::remove_file(&socket).with_context(|| {
-                    format!("failed to remove stale socket {}", socket.display())
-                })?;
+        match daemon_info_at(socket) {
+            Ok(info) if daemon_matches_cli(&info) => return Ok(()),
+            Ok(_) => {
+                let _ = request_at(socket, Request::Shutdown);
+                wait_for_socket_exit(socket);
             }
+            Err(_) => {}
+        }
+        if socket.exists() {
+            fs::remove_file(socket)
+                .with_context(|| format!("failed to remove stale socket {}", socket.display()))?;
         }
     }
 
@@ -179,7 +189,7 @@ fn ensure_daemon() -> Result<()> {
     Command::new(exe)
         .arg("daemon")
         .arg("--socket")
-        .arg(&socket)
+        .arg(socket)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -188,13 +198,60 @@ fn ensure_daemon() -> Result<()> {
 
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
-        if reload_at(&socket).is_ok() {
+        if request_at(socket, Request::Ping).is_ok() {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
     }
 
     bail!("tpane daemon did not become ready at {}", socket.display())
+}
+
+fn wait_for_socket_exit(socket: &PathBuf) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while socket.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn daemon_info_at(socket: &PathBuf) -> Result<DaemonInfo> {
+    let response = request_at(socket, Request::Info)?;
+    if !response.ok {
+        bail!(
+            response
+                .error
+                .unwrap_or_else(|| "daemon info failed".to_string())
+        );
+    }
+    Ok(serde_json::from_str(
+        response.data.as_deref().unwrap_or("{}"),
+    )?)
+}
+
+fn daemon_matches_cli(info: &DaemonInfo) -> bool {
+    match compare_versions(env!("CARGO_PKG_VERSION"), &info.version) {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Greater => false,
+        std::cmp::Ordering::Equal => info.exe_hash == exe_identity::current_exe_hash(),
+    }
+}
+
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse = |value: &str| {
+        value
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    let a = parse(a);
+    let b = parse(b);
+    for idx in 0..a.len().max(b.len()) {
+        match a.get(idx).unwrap_or(&0).cmp(b.get(idx).unwrap_or(&0)) {
+            std::cmp::Ordering::Equal => {}
+            ordering => return ordering,
+        }
+    }
+    std::cmp::Ordering::Equal
 }
 
 fn reload_at(socket: &PathBuf) -> Result<()> {
@@ -212,6 +269,7 @@ fn reload_at(socket: &PathBuf) -> Result<()> {
 
 fn request(request: Request) -> Result<Response> {
     let socket = socket_path()?;
+    ensure_current_daemon(&socket)?;
     request_at(&socket, request)
 }
 
@@ -299,7 +357,7 @@ fn builtin_plugin_status(status: &plugins::PluginStatus) -> bool {
 fn builtin_plugin_name(name: &str) -> bool {
     matches!(
         name,
-        "vim-navigator" | "yank" | "themes" | "sensible" | "pane-detection" | "open-url"
+        "vim-navigator" | "yank" | "themes" | "sensible" | "pane-detection" | "open-url" | "agents"
     )
 }
 

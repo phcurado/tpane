@@ -14,11 +14,12 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 
+use crate::exe_identity;
 use crate::lua_runtime::{
     JobDef, LuaRuntime, StatePresentation, StatusRender, config_lua_files, user_plugin_files,
 };
 use crate::process::{ProcessProvider, SystemProcessProvider};
-use crate::protocol::{PaneSnapshot, Request, Response};
+use crate::protocol::{DaemonInfo, PaneSnapshot, Request, Response};
 use crate::store::Store;
 use crate::tmux;
 
@@ -26,6 +27,7 @@ const MAX_RUNTIME_ERRORS: usize = 50;
 const MAX_TMUX_LIVENESS_FAILURES: usize = 5;
 const SERVER_SENTINEL: &str = "@tpane_applied";
 const STATUSLINE_SENTINEL: &str = "@tpane_statusline";
+const DAEMON_PID_VAR: &str = "@tpane_daemon_pid";
 const MAX_STATUS_ROWS: usize = 5;
 const INITIAL_JOB_RETRY_SECS: u64 = 5;
 
@@ -42,8 +44,11 @@ struct JobResult {
 
 pub fn run(socket: PathBuf) -> Result<()> {
     if socket.exists() {
-        fs::remove_file(&socket)
-            .with_context(|| format!("failed to remove existing socket {}", socket.display()))?;
+        match UnixStream::connect(&socket) {
+            Ok(_) => return Ok(()),
+            Err(_) => fs::remove_file(&socket)
+                .with_context(|| format!("failed to remove stale socket {}", socket.display()))?,
+        }
     }
     if let Some(parent) = socket.parent() {
         fs::create_dir_all(parent)?;
@@ -54,11 +59,17 @@ pub fn run(socket: PathBuf) -> Result<()> {
     listener.set_nonblocking(true)?;
 
     let mut daemon = Daemon::new()?;
+    let pid = std::process::id().to_string();
+    tmux::set_global_var(DAEMON_PID_VAR, &pid)?;
     let started = Instant::now();
     let mut last_scan = Instant::now();
     let mut tmux_liveness_failures = 0usize;
 
     loop {
+        if tmux::get_global_var(DAEMON_PID_VAR).unwrap_or_default() != pid {
+            break;
+        }
+
         accept_ready(&listener, &mut daemon)?;
 
         if let Some(sig) = daemon.config_changed() {
@@ -85,6 +96,9 @@ pub fn run(socket: PathBuf) -> Result<()> {
         thread::sleep(Duration::from_millis(100));
     }
 
+    if tmux::get_global_var(DAEMON_PID_VAR).unwrap_or_default() == pid {
+        let _ = tmux::unset_global_var(DAEMON_PID_VAR);
+    }
     let _ = fs::remove_file(socket);
     Ok(())
 }
@@ -159,6 +173,16 @@ impl Daemon {
     fn handle(&mut self, request: Request) -> Response {
         match request {
             Request::Ping => Response::ok(Some("ok".to_string())),
+            Request::Info => Response::ok(Some(
+                serde_json::to_string(&daemon_info()).unwrap_or_else(|_| "{}".to_string()),
+            )),
+            Request::Shutdown => {
+                thread::spawn(|| {
+                    thread::sleep(Duration::from_millis(50));
+                    std::process::exit(0);
+                });
+                Response::ok(Some("shutting down".to_string()))
+            }
             Request::Refresh => match self.reload_plugins().and_then(|()| self.scan()) {
                 Ok(count) => Response::ok(Some(format!("refreshed {count} panes"))),
                 Err(error) => Response::error(error),
@@ -790,6 +814,11 @@ impl Daemon {
                 value: value.clone(),
             },
         );
+        for pane in self.panes.borrow_mut().iter_mut() {
+            if pane.id == pane_id {
+                pane.state = Some(value.clone());
+            }
+        }
         self.set_pane_var(pane_id, "@tpane_state", &value)?;
         if changed {
             self.record_runtime_errors(self.lua.fire_event_text("state:change", pane_id));
@@ -805,6 +834,11 @@ impl Daemon {
             return;
         }
         mark_record_seen(record);
+        for pane in self.panes.borrow_mut().iter_mut() {
+            if pane.id == pane_id {
+                pane.state = Some("idle_seen".to_string());
+            }
+        }
         let _ = self.set_pane_var(pane_id, "@tpane_state", "idle_seen");
         self.record_runtime_errors(self.lua.fire_event_text("state:change", pane_id));
     }
@@ -949,6 +983,13 @@ impl Daemon {
 #[cfg(test)]
 fn should_exit_after_liveness_failure(failures: usize) -> bool {
     failures >= MAX_TMUX_LIVENESS_FAILURES
+}
+
+fn daemon_info() -> DaemonInfo {
+    DaemonInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        exe_hash: exe_identity::current_exe_hash(),
+    }
 }
 
 fn basename(path: &str) -> String {

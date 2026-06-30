@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.9 - 2026-06-30
+
+### Features
+
+- add `agents` built-in plugin for agent notifications in window tabs
+
+### Bug Fixes
+
+- restart stale daemons automatically when the on-disk tpane binary changes
+- prevent duplicate daemons from racing over pane and tab state
+
 ## 0.5.8 - 2026-06-29
 
 ### Features

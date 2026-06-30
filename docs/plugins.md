@@ -62,6 +62,49 @@ tpane.use("open-url")
 
 Binds `<prefix> o` in normal mode and `C-o` in copy mode. Supports `https://`, `http://`, `www.`, common bare domains and `localhost` URLs.
 
+### agents
+
+Show agent pane notifications directly in window tabs.
+
+```lua
+tpane.use("agents")
+tpane.tabline({ label = "cwd" })
+```
+
+The plugin finds known agent panes and marks their window tab. By default, detected agents show as idle. Live state comes from the agent, not from scraping scrollback.
+
+States:
+
+| State     | Tab meaning                        |
+| --------- | ---------------------------------- |
+| `idle`    | agent is waiting for a prompt      |
+| `working` | agent is running                   |
+| `blocked` | agent needs approval or input      |
+| `done`    | agent finished while you were away |
+
+You can test it manually from inside an agent pane:
+
+```sh
+tpane set-state "$TMUX_PANE" working
+tpane set-state "$TMUX_PANE" blocked
+tpane set-state "$TMUX_PANE" done
+tpane set-state "$TMUX_PANE" idle
+```
+
+Built-in matching covers Claude, Codex, OpenCode, Gemini, and Pi. They show as idle unless the agent is configured to report state to tpane.
+
+For now, automatic state reporting is manual setup. Built-in setup helpers for Claude, Codex, and OpenCode are planned.
+
+Custom agents can be added from Lua:
+
+```lua
+tpane.agents.register({
+  name = "my-agent",
+  label = "agent",
+  commands = { "my-agent" },
+})
+```
+
 ### themes
 
 Bundled themes from the iTerm2 Color Schemes collection.
