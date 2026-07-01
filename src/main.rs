@@ -14,7 +14,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::thread;
@@ -165,7 +165,7 @@ fn ensure_daemon() -> Result<()> {
     reload_at(&socket)
 }
 
-fn ensure_current_daemon(socket: &PathBuf) -> Result<()> {
+fn ensure_current_daemon(socket: &Path) -> Result<()> {
     if socket.exists() {
         match daemon_info_at(socket) {
             Ok(info) if daemon_matches_cli(&info) => return Ok(()),
@@ -207,14 +207,14 @@ fn ensure_current_daemon(socket: &PathBuf) -> Result<()> {
     bail!("tpane daemon did not become ready at {}", socket.display())
 }
 
-fn wait_for_socket_exit(socket: &PathBuf) {
+fn wait_for_socket_exit(socket: &Path) {
     let deadline = Instant::now() + Duration::from_secs(1);
     while socket.exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(50));
     }
 }
 
-fn daemon_info_at(socket: &PathBuf) -> Result<DaemonInfo> {
+fn daemon_info_at(socket: &Path) -> Result<DaemonInfo> {
     let response = request_at(socket, Request::Info)?;
     if !response.ok {
         bail!(
@@ -254,7 +254,7 @@ fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
-fn reload_at(socket: &PathBuf) -> Result<()> {
+fn reload_at(socket: &Path) -> Result<()> {
     let response = request_at(socket, Request::Reload)?;
     if response.ok {
         Ok(())
@@ -273,7 +273,7 @@ fn request(request: Request) -> Result<Response> {
     request_at(&socket, request)
 }
 
-fn request_at(socket: &PathBuf, request: Request) -> Result<Response> {
+fn request_at(socket: &Path, request: Request) -> Result<Response> {
     let mut stream = UnixStream::connect(socket)
         .with_context(|| format!("failed to connect to {}", socket.display()))?;
     serde_json::to_writer(&mut stream, &request)?;
